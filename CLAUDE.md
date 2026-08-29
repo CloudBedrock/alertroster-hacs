@@ -18,10 +18,11 @@ manually — `user` (host/port + reachability probe) then `pair` (8-digit code �
 and re-pairs through `reauth_confirm` when a token is revoked; `services.py` has `raise` and
 `resolve`; `connection.py` holds the events socket open per entry, seeding from
 `GET /v1/alerts` on setup and after every reconnect; `events.py` turns each transition into the
-bus event §3.4 names, so an automation can trigger on `alertroster_unacknowledged` today. Still
-missing: zeroconf discovery (AHA-6) — the manifest already advertises the service type, so a
-station shows up as a discovered card that prefills nothing — and every entity platform, so
-`PLATFORMS` is still empty and no *entity* yet listens to `StationConnection`.
+bus event §3.4 names, so an automation can trigger on `alertroster_unacknowledged` today;
+`config_flow.py`'s `zeroconf` step turns an announcement into a discovery card, keyed on the
+station's name rather than its address for the reasons §3.1 now records. Still missing: every
+entity platform, so `PLATFORMS` is still empty and no *entity* yet listens to
+`StationConnection`.
 
 Tests run against a fake station that is a **real `aiohttp` server** on a loopback port
 (`tests/conftest.py`), not a mocked client — `pytest-socket` blocks everything else, which is
