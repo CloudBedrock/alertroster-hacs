@@ -10,6 +10,7 @@ it so a failure says what it was waiting for instead of timing out namelessly.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 from collections.abc import Callable, Iterator
 from typing import Any
 
@@ -380,6 +381,9 @@ async def test_a_socket_that_drops_at_once_does_not_reset_the_backoff(
     # Six flaps, each connecting and dropping immediately.
     for _ in range(6):
         connection._async_on_connect()  # noqa: SLF001
+        # The handshake must record when it happened -- without that the reset
+        # below can never fire and this test would pass for the wrong reason.
+        assert connection._connected_at is not None  # noqa: SLF001
         connection._next_backoff()  # noqa: SLF001
 
     assert connection._next_backoff() >= BACKOFF_MAX / 2  # noqa: SLF001
@@ -388,16 +392,49 @@ async def test_a_socket_that_drops_at_once_does_not_reset_the_backoff(
 async def test_a_socket_that_held_resets_the_backoff(
     hass: HomeAssistant, station: FakeStation, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A connection that worked means the next outage starts from 1 s again."""
+    """A connection that worked means the next outage starts from 1 s again.
+
+    The window is crossed by really waiting out a shortened `BACKOFF_MAX`
+    rather than by writing `_connected_at` by hand: the point of the test is
+    that `_async_on_connect` records the time at all, and a hand-written field
+    would keep passing with that line deleted.
+    """
+    monkeypatch.setattr(connection_module, "BACKOFF_MAX", 0.05)
     connection = _bare_connection(hass, station)
     for _ in range(6):
         connection._next_backoff()  # noqa: SLF001
 
     connection._async_on_connect()  # noqa: SLF001
-    # As if that socket had been up for well over the stability window.
-    connection._connected_at = asyncio.get_running_loop().time() - 10_000  # noqa: SLF001
+    await asyncio.sleep(0.06)
 
     assert connection._next_backoff() <= BACKOFF_START  # noqa: SLF001
+
+
+async def test_a_flapping_station_is_backed_off_in_practice(
+    hass: HomeAssistant, station: FakeStation, fast_backoff: None
+) -> None:
+    """The same thing end to end: accept, hang up, repeat -- and it slows down.
+
+    `fast_backoff` shrinks `BACKOFF_MAX`, which is also the stability window,
+    so a socket that is dropped the moment it opens never counts as one that
+    worked and the delay climbs to the (shortened) cap.
+    """
+    entry = await _setup(hass, station)
+    connection = _connection(entry)
+
+    async def hang_up() -> None:
+        while True:
+            if station.sockets:
+                await station.drop_sockets()
+            await asyncio.sleep(0.005)
+
+    hanging_up = asyncio.create_task(hang_up())
+    try:
+        await _until(lambda: connection._failures >= 3, "the backoff to climb")  # noqa: SLF001
+    finally:
+        hanging_up.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await hanging_up
 
 
 # -- revocation -----------------------------------------------------------

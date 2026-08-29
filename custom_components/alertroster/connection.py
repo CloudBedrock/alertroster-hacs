@@ -66,13 +66,6 @@ _BACKOFF_MAX_FAILURES = 6  # 2**6 = 64, already past the cap
 _BACKOFF_JITTER_MIN = 0.5
 _BACKOFF_JITTER_MAX = 1.0
 
-# How long a socket has to stay up before it counts as a good connection and
-# the backoff starts again from 1 s. Without this, resetting on the handshake
-# alone lets a station that accepts the upgrade and immediately closes it pin
-# the retry at ~1 s -- plus a full re-seed each time -- for as long as it keeps
-# doing that, which is exactly the case the backoff exists for.
-_STABLE_AFTER = BACKOFF_MAX
-
 # How long `async_stop` will wait for the socket to close before giving up on
 # it. Longer than `api.py`'s `ws_close` would let one unresponsive station hold
 # up Home Assistant's shutdown; this is deliberately shorter.
@@ -184,30 +177,36 @@ class StationConnection:
         task, self._task = self._task, None
         if task is not None:
             task.cancel()
-            try:
-                # Bounded, because the close handshake runs under `ws_close`
-                # (api.py) and a station that holds the TCP connection open
-                # while never answering the close frame would otherwise block
-                # unload, reload and Home Assistant's own shutdown for the
-                # whole of that timeout. The task is the entry's, so if this
-                # gives up on it Home Assistant cancels it again on teardown.
-                async with asyncio.timeout(_STOP_TIMEOUT):
-                    await task
-            except TimeoutError:
+            # `wait` rather than `await task`: awaiting a task you just
+            # cancelled raises `CancelledError`, and swallowing that would also
+            # swallow a cancellation aimed at *this* coroutine -- a Home
+            # Assistant shutdown that cancelled the unload would look like it
+            # had finished. `wait` reports on the task instead of re-raising
+            # for it, while still propagating a cancellation of our own.
+            #
+            # Bounded, because the close handshake runs under `ws_close`
+            # (api.py) and a station that holds the TCP connection open while
+            # never answering the close frame would otherwise block unload,
+            # reload and shutdown for the whole of that timeout. The task is
+            # the entry's, so anything left running is cancelled again by Home
+            # Assistant on teardown.
+            done, _pending = await asyncio.wait({task}, timeout=_STOP_TIMEOUT)
+            if not done:
                 _LOGGER.debug(
                     "The AlertRoster station %s did not close its events socket in time",
                     self._entry.title,
                 )
-            except asyncio.CancelledError:
-                pass
-            except Exception:
-                # The loop already handles every failure the station can cause,
-                # so reaching here means a bug in this file. Report it and let
-                # the unload finish: an entry that cannot be removed because
-                # its events task died is a worse failure than the one that
-                # killed it, and it would leave the user no way out.
-                _LOGGER.exception(
-                    "The AlertRoster events task for %s ended in an error", self._entry.title
+            elif not task.cancelled() and (failure := task.exception()) is not None:
+                # The loop handles every failure the station can cause, so
+                # reaching here means a bug in this file. Report it and let the
+                # unload finish: an entry that cannot be removed because its
+                # events task died is a worse failure than the one that killed
+                # it, and it would leave the user no way out.
+                _LOGGER.error(
+                    "The AlertRoster events task for %s ended in an error: %s",
+                    self._entry.title,
+                    failure,
+                    exc_info=failure,
                 )
         self._async_set_connected(False)
 
@@ -313,7 +312,7 @@ class StationConnection:
         The backoff is deliberately *not* cleared here. A station that accepts
         the upgrade and closes it immediately would otherwise reset it on every
         cycle and never back off at all; `_next_backoff` clears it only once
-        the socket has held for `_STABLE_AFTER`.
+        the socket has held for `BACKOFF_MAX`.
         """
         self._connected_at = asyncio.get_running_loop().time()
         self._async_set_connected(True)
@@ -383,13 +382,16 @@ class StationConnection:
     def _next_backoff(self) -> float:
         """How long to wait before the next attempt, and count this failure.
 
-        A socket that stayed up for `_STABLE_AFTER` is treated as a connection
+        A socket that stayed up for `BACKOFF_MAX` is treated as a connection
         that worked, so the next outage starts again from 1 s rather than from
         wherever the last run of failures had climbed to.
         """
+        # `BACKOFF_MAX` doubles as the "this connection worked" threshold, read
+        # here rather than snapshotted into a constant of its own: two names for
+        # one number drift the moment anything patches only one of them.
         held_for = self._held_for()
         self._connected_at = None
-        if held_for is not None and held_for >= _STABLE_AFTER:
+        if held_for is not None and held_for >= BACKOFF_MAX:
             self._failures = 0
 
         delay = min(BACKOFF_MAX, BACKOFF_START * float(2**self._failures))
