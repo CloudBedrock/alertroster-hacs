@@ -36,7 +36,8 @@
       "already_configured": "This station is already paired.",
       "reauth_successful": "Paired again. Home Assistant can raise alerts on this station once more.",
       "cannot_connect": "Could not reach the station at the address it announced. Is 'Accept sources from the LAN' still turned on in its Pairing screen?",
-      "unsupported_version": "This station announced itself in a way this version of the integration does not understand. Update the AlertRoster integration, or add the station by host and port instead."
+      "unsupported_version": "This station announced itself in a way this version of the integration does not understand. Update the AlertRoster integration, or add the station by host and port instead.",
+      "already_in_progress": "This station is already being set up."
     }
   },
   "services": {
