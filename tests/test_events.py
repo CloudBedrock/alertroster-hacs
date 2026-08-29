@@ -22,6 +22,7 @@ from custom_components.alertroster.api import StationEvent
 from custom_components.alertroster.connection import _CLOSES_ALERT, _OPENS_ALERT
 from custom_components.alertroster.const import (
     ATTR_ALERT,
+    ATTR_ENTRY_ID,
     ATTR_STATION,
     BUS_EVENTS,
     CONF_SOURCE_ID,
@@ -177,7 +178,7 @@ async def test_the_event_carries_the_whole_alert_and_the_station(
     hass: HomeAssistant, station: FakeStation, bus: _Bus
 ) -> None:
     """Every field the station sent, plus which station sent it."""
-    await _setup(hass, station)
+    entry = await _setup(hass, station)
     sent = _alert()
 
     await station.push("alert.triggered", sent)
@@ -186,6 +187,7 @@ async def test_the_event_carries_the_whole_alert_and_the_station(
     data = bus.only().data
     assert data[ATTR_ALERT] == sent
     assert data[ATTR_STATION] == "studio"
+    assert data[ATTR_ENTRY_ID] == entry.entry_id
 
 
 async def test_the_cloud_field_is_passed_through_unmodified(
@@ -218,6 +220,53 @@ async def test_the_station_name_follows_a_rename(
     await _until(lambda: bool(bus.events), "the trigger event to fire")
 
     assert bus.only().data[ATTR_STATION] == "kitchen"
+
+
+async def test_the_entry_id_survives_a_rename(
+    hass: HomeAssistant, station: FakeStation, bus: _Bus
+) -> None:
+    """AHA-35: the name is what a person reads, `entry_id` is what a template matches.
+
+    An automation filtering on the friendly name would stop firing the moment
+    somebody renamed the entry in the UI, so the stable half has to be carried
+    too -- and has to be the same value either side of the rename.
+    """
+    entry = await _setup(hass, station)
+
+    await station.push("alert.triggered", _alert("alert_before"))
+    await _until(lambda: bool(bus.events), "the first trigger event to fire")
+    before = bus.only().data[ATTR_ENTRY_ID]
+
+    bus.events.clear()
+    hass.config_entries.async_update_entry(entry, title="kitchen")
+    await hass.async_block_till_done()
+
+    await station.push("alert.triggered", _alert("alert_after"))
+    await _until(lambda: bool(bus.events), "the second trigger event to fire")
+
+    after = bus.only().data
+    assert after[ATTR_STATION] == "kitchen"
+    assert after[ATTR_ENTRY_ID] == before == entry.entry_id
+
+
+async def test_two_stations_are_told_apart_by_entry_id(
+    hass: HomeAssistant, station: FakeStation, second_station: FakeStation, bus: _Bus
+) -> None:
+    """AHA-35: two entries sharing a name are still distinguishable on the bus.
+
+    This is the README's promise -- "an automation watching two stations can
+    tell which one rang" -- and the friendly name alone cannot keep it.
+    """
+    first = await _setup(hass, station, title="studio")
+    second = await _setup(hass, second_station, title="studio")
+
+    await second_station.push("alert.triggered", _alert())
+    await _until(lambda: bool(bus.events), "the trigger event to fire")
+
+    data = bus.only().data
+    assert data[ATTR_STATION] == "studio"
+    assert data[ATTR_ENTRY_ID] == second.entry_id
+    assert data[ATTR_ENTRY_ID] != first.entry_id
 
 
 async def test_the_event_payload_cannot_be_edited_into_the_connection(
