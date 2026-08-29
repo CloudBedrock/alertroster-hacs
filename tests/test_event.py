@@ -14,10 +14,12 @@ from collections.abc import Callable
 from typing import Any
 
 import pytest
+from homeassistant.config_entries import ConfigEntryState
 from homeassistant.const import CONF_HOST, CONF_PORT, CONF_TOKEN, STATE_UNAVAILABLE
-from homeassistant.core import HomeAssistant, State
+from homeassistant.core import Event, EventStateChangedData, HomeAssistant, State, callback
 from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers import entity_registry as er
+from homeassistant.helpers.event import async_track_state_change_event
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
 from custom_components.alertroster.const import (
@@ -47,9 +49,14 @@ async def _until(check: Callable[[], bool], what: str, timeout: float = _TIMEOUT
 
 
 async def _setup(
-    hass: HomeAssistant, station: FakeStation, title: str = "studio"
+    hass: HomeAssistant, station: FakeStation, title: str = "studio", *, connect: bool = True
 ) -> MockConfigEntry:
-    """A paired station, set up the way the config flow leaves it."""
+    """A paired station, set up the way the config flow leaves it.
+
+    `connect=False` for a station whose socket never opens: the entry still
+    loads (`connection.py` says why), so the wait for `connected` would be a
+    ten-second timeout rather than a failure worth reading.
+    """
     entry = MockConfigEntry(
         domain=DOMAIN,
         title=title,
@@ -65,9 +72,10 @@ async def _setup(
     entry.add_to_hass(hass)
     assert await hass.config_entries.async_setup(entry.entry_id)
     await hass.async_block_till_done()
-    connection = entry.runtime_data.connection
-    await _until(lambda: connection.connected, "the events socket to open")
-    await hass.async_block_till_done()
+    if connect:
+        connection = entry.runtime_data.connection
+        await _until(lambda: connection.connected, "the events socket to open")
+        await hass.async_block_till_done()
     return entry
 
 
@@ -86,6 +94,26 @@ def _alert(alert_id: str = "alt_1", status: str = "triggered") -> dict[str, Any]
         # a template.
         "cloud": {"synced": True, "id": "cl_9", "tags": ["ops", "night"]},
     }
+
+
+def _record_writes(hass: HomeAssistant) -> list[State]:
+    """Every state the entity is written from now on, in order.
+
+    Reading the attribute at the end of a test cannot tell "fired nothing"
+    from "fired and was overwritten by the next frame" -- the frame that
+    proves the socket is still working is also the frame that hides the bug.
+    Every write is kept instead, so a transition the entity should have
+    dropped is still in the list when the assertion runs.
+    """
+    written: list[State] = []
+
+    @callback
+    def _note(event: Event[EventStateChangedData]) -> None:
+        if (state := event.data["new_state"]) is not None:
+            written.append(state)
+
+    async_track_state_change_event(hass, [_ENTITY_ID], _note)
+    return written
 
 
 async def _push(hass: HomeAssistant, station: FakeStation, transition: str, **kwargs: Any) -> State:
@@ -145,6 +173,32 @@ async def test_event_types_are_the_four_transitions(
     # Nothing has happened yet, so there is no last event -- but the entity is
     # there, which is what makes it pickable before the first alert.
     assert state.attributes["event_type"] is None
+
+
+async def test_the_event_types_are_not_shared_between_stations(
+    hass: HomeAssistant, station: FakeStation, second_station: FakeStation
+) -> None:
+    """`event_types` goes to the state machine as-is, so it cannot be shared.
+
+    A template calling `state_attr(..., 'event_types').append(...)` edits the
+    list Home Assistant is holding; one list on the class would make that edit
+    show up on every paired station's entity.
+    """
+    await _setup(hass, station)
+    await _setup(hass, second_station, title="kitchen")
+
+    studio = hass.states.get(_ENTITY_ID)
+    assert studio is not None
+    studio.attributes["event_types"].append("snoozed")
+
+    kitchen = hass.states.get("event.kitchen_alert")
+    assert kitchen is not None
+    assert kitchen.attributes["event_types"] == [
+        "triggered",
+        "acknowledged",
+        "resolved",
+        "unacknowledged",
+    ]
 
 
 async def test_two_stations_get_an_entity_each(
@@ -232,13 +286,18 @@ async def test_a_later_transition_replaces_the_last(
 
 async def test_the_join_snapshot_fires_nothing(hass: HomeAssistant, station: FakeStation) -> None:
     """A snapshot is state, not a transition (`event.py` says why)."""
+    # Two different alerts, because the seed and the snapshot otherwise carry
+    # the same one and "the snapshot arrived" cannot be told from "the seed
+    # did". `alt_2` in the open set is the snapshot, and only the snapshot.
     station.alerts = {"alt_1": _alert()}
+    station.snapshot_alerts = [_alert(alert_id="alt_2")]
     entry = await _setup(hass, station)
 
-    # The connection has an open alert, so the seed and the join snapshot have
-    # both been through it -- the entity heard them and fired nothing.
     connection = entry.runtime_data.connection
-    await _until(lambda: len(connection.open_alerts) == 1, "the snapshot to reach the connection")
+    await _until(
+        lambda: [a["id"] for a in connection.open_alerts] == ["alt_2"],
+        "the join snapshot to reach the connection",
+    )
     await hass.async_block_till_done()
 
     state = hass.states.get(_ENTITY_ID)
@@ -251,16 +310,16 @@ async def test_a_transition_with_no_alert_fires_nothing(
 ) -> None:
     """§4.6 says a transition carries its alert; one that does not is dropped."""
     await _setup(hass, station)
+    written = _record_writes(hass)
 
     for socket in list(station.sockets):
         await socket.send_json({"event": "alert.expired"})
     # Then a frame that *is* usable, so the assertion is not merely racing the
-    # first one through the socket.
+    # first one through the socket: frames are delivered in order, so by the
+    # time this one has landed the bad one has been through the entity too.
     await _push(hass, station, "alert.triggered")
 
-    state = hass.states.get(_ENTITY_ID)
-    assert state is not None
-    assert state.attributes["event_type"] == "triggered"
+    assert [state.attributes["event_type"] for state in written] == ["triggered"]
 
 
 async def test_an_unknown_station_event_fires_nothing(
@@ -268,16 +327,35 @@ async def test_an_unknown_station_event_fires_nothing(
 ) -> None:
     """§9 makes new events additive: an older integration ignores them."""
     await _setup(hass, station)
+    written = _record_writes(hass)
 
     await station.push("alert.snoozed", _alert())
     await _push(hass, station, "alert.triggered")
 
-    state = hass.states.get(_ENTITY_ID)
-    assert state is not None
-    assert state.attributes["event_type"] == "triggered"
+    assert [state.attributes["event_type"] for state in written] == ["triggered"]
 
 
 # -- availability ---------------------------------------------------------
+
+
+async def test_unavailable_before_the_socket_ever_opens(
+    hass: HomeAssistant, station: FakeStation
+) -> None:
+    """A station reachable over HTTP but not over the socket is still unknown.
+
+    The seed runs before the socket (`connection.py`), so the connection can
+    hold alerts while nothing is listening for what happens to them next. The
+    entity must say `unavailable` rather than appear as a working, empty one.
+    """
+    station.events_status = 503
+    entry = await _setup(hass, station, connect=False)
+
+    assert entry.state is ConfigEntryState.LOADED
+    assert not entry.runtime_data.connection.connected
+
+    state = hass.states.get(_ENTITY_ID)
+    assert state is not None
+    assert state.state == STATE_UNAVAILABLE
 
 
 async def test_unavailable_while_the_socket_is_down(

@@ -55,8 +55,12 @@ class AlertRosterEntity(Entity):
         self._attr_device_info = DeviceInfo(
             identifiers={(DOMAIN, entry.entry_id)},
             # The entry's title, so the device is called whatever the station
-            # called itself at pairing and whatever the user renames the entry
-            # to afterwards.
+            # called itself at pairing, and whatever the user renames the entry
+            # to -- from the next reload. Renaming an entry does not reload it
+            # and Home Assistant re-reads `DeviceInfo` only when the platform
+            # sets the entity up again, so the device page keeps the old name
+            # until then. Forcing a reload on rename would drop the events
+            # socket, which is a worse trade than a stale label.
             name=entry.title,
             manufacturer=DEVICE_MANUFACTURER,
             model=DEVICE_MODEL,
