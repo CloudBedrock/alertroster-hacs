@@ -14,6 +14,13 @@
         "data": {
           "code": "Pairing code"
         }
+      },
+      "reauth_confirm": {
+        "title": "Pair with {name} again",
+        "description": "This station no longer recognises Home Assistant — pair again. On the station open Service → Pairing → Pair a new source, then enter the 8-digit code shown there.",
+        "data": {
+          "code": "Pairing code"
+        }
       }
     },
     "error": {
@@ -25,7 +32,8 @@
       "unknown": "Unexpected error while pairing with the station. Check the Home Assistant log."
     },
     "abort": {
-      "already_configured": "This station is already paired."
+      "already_configured": "This station is already paired.",
+      "reauth_successful": "Paired again. Home Assistant can raise alerts on this station once more."
     }
   },
   "services": {

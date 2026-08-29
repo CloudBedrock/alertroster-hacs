@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import logging
 from collections.abc import AsyncIterator
@@ -316,3 +317,66 @@ async def test_events_ends_when_the_station_closes_the_socket(
             await station.drop_sockets()
 
     assert [e.event for e in seen] == ["snapshot"]
+
+
+async def test_events_reports_the_socket_is_open_before_any_frame(
+    session: aiohttp.ClientSession, station: FakeStation
+) -> None:
+    """`on_connect` fires on the upgrade, not on the first thing the station says.
+
+    The reconnect loop hangs `connected` off this. Asserting it lands before
+    the snapshot is the whole point: if it only fired with the first frame, a
+    station that followed §4.6 to the letter and stayed quiet would look
+    disconnected for as long as it had nothing to report.
+    """
+    client = _client(session, station, station.issue_token())
+
+    order: list[str] = []
+    async with contextlib.aclosing(client.events(lambda: order.append("connected"))) as events:
+        async for event in events:
+            order.append(event.event)
+            await station.drop_sockets()
+
+    assert order == ["connected", "snapshot"]
+
+
+async def test_events_does_not_need_an_on_connect_callback(
+    session: aiohttp.ClientSession, station: FakeStation
+) -> None:
+    """It stays optional: the config flow and the tests have no use for it."""
+    client = _client(session, station, station.issue_token())
+
+    async with contextlib.aclosing(client.events()) as events:
+        async for _event in events:
+            await station.drop_sockets()
+
+
+async def test_events_leaves_no_heartbeat_timer_when_abandoned(
+    session: aiohttp.ClientSession, station: FakeStation
+) -> None:
+    """AHA-34: breaking out of the loop must not leave a timer behind.
+
+    The reconnect loop stops mid-stream on unload and on reauth, so a timer
+    left per abandon is a leak that grows with uptime. Counted directly off the
+    loop rather than trusting Home Assistant's lingering-timer check, because
+    this module's tests do not run under it.
+    """
+    loop = asyncio.get_running_loop()
+
+    def live_heartbeats() -> int:
+        return sum(
+            1
+            for handle in loop._scheduled  # noqa: SLF001
+            if not handle.cancelled() and "_send_heartbeat" in repr(handle)
+        )
+
+    before = live_heartbeats()
+    client = _client(session, station, station.issue_token())
+
+    async with contextlib.aclosing(client.events()) as events:
+        async for _event in events:
+            break
+
+    # A tick, because the reschedule this guards against is a `call_soon`.
+    await asyncio.sleep(0)
+    assert live_heartbeats() == before
