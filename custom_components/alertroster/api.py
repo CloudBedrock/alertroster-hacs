@@ -25,7 +25,7 @@ from __future__ import annotations
 
 import json
 import logging
-from collections.abc import AsyncGenerator
+from collections.abc import AsyncGenerator, Callable
 from dataclasses import dataclass, field
 from typing import Any, Self
 
@@ -445,8 +445,18 @@ class AlertRosterClient:
         alert = body.get("alert")
         return alert if isinstance(alert, dict) else {}
 
-    async def events(self) -> AsyncGenerator[StationEvent]:
+    async def events(
+        self, on_connect: Callable[[], None] | None = None
+    ) -> AsyncGenerator[StationEvent]:
         """Yield transitions from the station's events socket (§4.6).
+
+        `on_connect` is called once, as soon as the socket is open and before
+        any frame is read. Without it a caller can only infer that the socket
+        came up from the first frame it yields, which would make "connected"
+        depend on the station having something to say -- true of the shipped
+        service, which sends a `snapshot` on join, but not something §4.6
+        promises. It is deliberately synchronous: it exists to flip a flag and
+        tell listeners, not to do work in the middle of a connect.
 
         The socket is authenticated with the same Bearer header as every other
         request. The station also accepts `?token=`, but only as a fallback for
@@ -477,6 +487,7 @@ class AlertRosterClient:
         Reconnecting, and how long to wait before doing it, is the caller's
         business.
         """
+        opened: aiohttp.ClientWebSocketResponse | None = None
         try:
             async with self._session.ws_connect(
                 self._url("/v1/events"),
@@ -484,6 +495,9 @@ class AlertRosterClient:
                 timeout=EVENTS_TIMEOUT,
                 heartbeat=EVENTS_HEARTBEAT,
             ) as socket:
+                opened = socket
+                if on_connect is not None:
+                    on_connect()
                 async for message in socket:
                     # aiohttp ends the iteration itself on CLOSE/CLOSING/CLOSED,
                     # so what arrives here is TEXT, BINARY or ERROR.
@@ -526,6 +540,34 @@ class AlertRosterClient:
                 f"the AlertRoster station at {self._host}:{self._port} "
                 f"did not complete the events socket handshake"
             ) from None
+        finally:
+            if opened is not None:
+                self._cancel_heartbeat(opened)
+
+    @staticmethod
+    def _cancel_heartbeat(socket: aiohttp.ClientWebSocketResponse) -> None:
+        """Stop the heartbeat aiohttp may have rescheduled while closing (AHA-34).
+
+        Closing a socket cancels its heartbeat timer, and then -- if the
+        station's half of the close handshake arrives during the close --
+        `_on_data_received` schedules `_reset_heartbeat`, which has no "am I
+        closed" guard and starts a fresh timer nobody will ever cancel
+        (aiohttp 3.14.3, `client_ws.py`). Only the abandon path hits it: when
+        the station ends the stream the last frame arrives before the close
+        begins, so the reset has already run. But the reconnect loop abandons
+        this generator whenever it stops mid-stream, which would be a live
+        `TimerHandle` per reconnect, and Home Assistant's test harness fails
+        outright on a lingering timer.
+
+        Reaching for a private method is not something to do twice; it is done
+        here because the timer is not reachable any other way. Missing rather
+        than wrong is the failure mode chosen deliberately: if a later aiohttp
+        renames this, the leak comes back exactly as it is today and nothing
+        breaks -- which is why this asks rather than assumes.
+        """
+        cancel = getattr(socket, "_cancel_heartbeat", None)
+        if callable(cancel):
+            cancel()
 
     @staticmethod
     def _event_from(data: str) -> StationEvent | None:

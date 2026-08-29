@@ -317,3 +317,139 @@ async def test_an_unnamed_instance_still_pairs_as_something(
     await _submit(hass, result["flow_id"], code=station.valid_code)
 
     assert station.paired_names == ["Home Assistant"]
+
+
+# -- reauth (AHA-9) -------------------------------------------------------
+
+
+def _paired(hass: HomeAssistant, station: FakeStation) -> MockConfigEntry:
+    """An entry as the flow leaves it, holding a token the station has forgotten."""
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        title="studio",
+        unique_id=station.source_id,
+        data={
+            CONF_HOST: station.host,
+            CONF_PORT: station.port,
+            CONF_TOKEN: "lat_the_one_that_was_revoked",
+            CONF_SOURCE_ID: station.source_id,
+            CONF_STATION_NAME: None,
+        },
+    )
+    entry.add_to_hass(hass)
+    return entry
+
+
+async def _start_reauth(hass: HomeAssistant, entry: MockConfigEntry) -> ConfigFlowResult:
+    """Start reauth the way a `401` does (§3.6)."""
+    entry.async_start_reauth(hass)
+    await hass.async_block_till_done()
+    flows = hass.config_entries.flow.async_progress_by_handler(DOMAIN)
+    assert len(flows) == 1
+    return await hass.config_entries.flow.async_configure(flows[0]["flow_id"], None)
+
+
+async def test_reauth_replaces_the_token_on_the_existing_entry(
+    hass: HomeAssistant, station: FakeStation
+) -> None:
+    """AHA-9: pair again, same entry, no second one."""
+    entry = _paired(hass, station)
+
+    result = await _start_reauth(hass, entry)
+    assert result["type"] is FlowResultType.FORM
+    # Its own step, because "this station no longer recognises Home Assistant"
+    # is not something the ordinary pair step has any reason to say.
+    assert result["step_id"] == "reauth_confirm"
+    assert result["description_placeholders"] == {"name": station.host}
+
+    result = await _submit(hass, result["flow_id"], code=station.valid_code)
+
+    assert result["type"] is FlowResultType.ABORT
+    assert result["reason"] == "reauth_successful"
+    assert len(hass.config_entries.async_entries(DOMAIN)) == 1
+    assert entry.data[CONF_TOKEN] != "lat_the_one_that_was_revoked"
+    assert entry.data[CONF_TOKEN] in station.tokens
+
+
+async def test_reauth_never_asks_for_the_address_again(
+    hass: HomeAssistant, station: FakeStation
+) -> None:
+    """There is no host field, so reauth cannot repoint an entry at another station."""
+    entry = _paired(hass, station)
+
+    result = await _start_reauth(hass, entry)
+
+    schema = result["data_schema"]
+    assert schema is not None
+    assert set(schema.schema) == {"code"}
+    # The address it will POST to is the entry's, untouched.
+    assert entry.data[CONF_HOST] == station.host
+    assert entry.data[CONF_PORT] == station.port
+
+
+async def test_reauth_follows_the_station_to_its_new_source_id(
+    hass: HomeAssistant, station: FakeStation
+) -> None:
+    """§6.2 ties a token to a source row, and pairing again mints a new one.
+
+    Keeping the old `source_id` as the unique id would leave the entry
+    identified by a row the station has deleted -- so the same station could be
+    added a second time under the id it now answers to.
+    """
+    entry = _paired(hass, station)
+    station.source_id = "src_a_brand_new_row"
+
+    result = await _start_reauth(hass, entry)
+    result = await _submit(hass, result["flow_id"], code=station.valid_code)
+
+    assert result["reason"] == "reauth_successful"
+    assert entry.unique_id == "src_a_brand_new_row"
+    assert entry.data[CONF_SOURCE_ID] == "src_a_brand_new_row"
+
+
+async def test_a_wrong_code_during_reauth_stays_on_the_reauth_step(
+    hass: HomeAssistant, station: FakeStation
+) -> None:
+    """The retry lands back where it was, not on the add-a-station form."""
+    entry = _paired(hass, station)
+
+    result = await _start_reauth(hass, entry)
+    result = await _submit(hass, result["flow_id"], code="00000000")
+
+    assert result["type"] is FlowResultType.FORM
+    assert result["step_id"] == "reauth_confirm"
+    assert result["errors"] == {"base": "invalid_code"}
+
+    result = await _submit(hass, result["flow_id"], code=station.valid_code)
+    assert result["type"] is FlowResultType.ABORT
+    assert result["reason"] == "reauth_successful"
+
+
+async def test_reauth_against_a_station_that_is_away_says_cannot_connect(
+    hass: HomeAssistant, station: FakeStation
+) -> None:
+    """Recoverable: the station comes back and the same flow finishes."""
+    entry = _paired(hass, station)
+    result = await _start_reauth(hass, entry)
+    await station.stop()
+
+    result = await _submit(hass, result["flow_id"], code=station.valid_code)
+
+    assert result["type"] is FlowResultType.FORM
+    assert result["step_id"] == "reauth_confirm"
+    assert result["errors"] == {"base": "cannot_connect"}
+
+
+async def test_the_replacement_token_reaches_no_log_record(
+    hass: HomeAssistant, station: FakeStation, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The rule that holds for pairing holds for re-pairing (§4.1)."""
+    entry = _paired(hass, station)
+
+    with caplog.at_level(logging.DEBUG):
+        result = await _start_reauth(hass, entry)
+        await _submit(hass, result["flow_id"], code=station.valid_code)
+
+    token = entry.data[CONF_TOKEN]
+    assert token.startswith("lat_")
+    assert token not in caplog.text

@@ -13,10 +13,13 @@ alerts on it from automations, and fires HA events when an alert is acknowledged
 M0–M6 milestone table. Read it before adding anything — it records decisions (and non-goals)
 that are not visible in the code.
 
-**Current state: partway through M1.** `api.py` is the wire client and `config_flow.py` pairs
-manually — `user` (host/port + reachability probe) then `pair` (8-digit code → source token).
-Still missing: zeroconf discovery (AHA-6), reauth on 401 (AHA-9), the events task (AHA-16),
-`services.yaml` and the services, and every entity platform, so `PLATFORMS` is still empty.
+**Current state: partway through M3.** `api.py` is the wire client; `config_flow.py` pairs
+manually — `user` (host/port + reachability probe) then `pair` (8-digit code → source token) —
+and re-pairs through `reauth_confirm` when a token is revoked; `services.py` has `raise` and
+`resolve`; `connection.py` holds the events socket open per entry, seeding from
+`GET /v1/alerts` on setup and after every reconnect. Still missing: zeroconf discovery (AHA-6),
+station transitions → HA bus events (AHA-17), and every entity platform, so `PLATFORMS` is
+still empty and nothing yet listens to `StationConnection`.
 
 Tests run against a fake station that is a **real `aiohttp` server** on a loopback port
 (`tests/conftest.py`), not a mocked client — `pytest-socket` blocks everything else, which is
