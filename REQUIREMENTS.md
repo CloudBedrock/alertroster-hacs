@@ -76,7 +76,9 @@ selectors so the automation editor renders a proper form):
 ### 3.4 Events on the Home Assistant bus
 
 Every transition received on the station's `GET /v1/events` WebSocket is fired as an HA event,
-carrying the complete alert object as `alert` plus `station` (entry name):
+carrying the complete alert object as `alert`, `station` (entry name, for display) and `entry_id`
+(the config entry id — what an automation filters on, since the name is user-editable and not
+unique, and `source_id` is reminted by §6.2 on every re-pair):
 
 | Station event | HA event |
 |---|---|
