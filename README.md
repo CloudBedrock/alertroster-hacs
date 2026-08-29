@@ -80,8 +80,27 @@ action:
 ```
 
 Also fired: `alertroster_triggered`, `alertroster_acknowledged`, `alertroster_resolved`. Each
-carries the whole alert as `alert` and the station's name as `station`, so an automation watching
-two stations can tell which one rang: `{{ trigger.event.data.station }}`.
+carries the whole alert as `alert`, the station's name as `station`, and the config entry it came
+from as `entry_id`.
+
+With two stations paired, say which one an automation is for by matching `entry_id` — it is
+stable, where the name is yours to change:
+
+```yaml
+trigger:
+  - platform: event
+    event_type: alertroster_unacknowledged
+    event_data:
+      entry_id: 01J9Z4Q0X8V2N7B3K5R6T1W8Y4
+action:
+  - action: notify.mobile_app_jims_phone
+    data:
+      message: "{{ trigger.event.data.station }}: {{ trigger.event.data.alert.title }}"
+```
+
+To find a station's `entry_id`, open **Developer tools → Events**, listen to
+`alertroster_triggered`, and raise a test alert from that station. Use `station` for anything a
+person reads — renaming the entry renames it in the next event.
 
 ### Entities
 
