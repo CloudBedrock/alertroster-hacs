@@ -91,6 +91,25 @@ class PairingWindowClosed(AlertRosterError):
     """
 
 
+class InvalidAlertId(AlertRosterError):
+    """An alert id that is not usable as a single path segment.
+
+    Alert ids come from an automation, so they are user input. `yarl` resolves
+    dot segments when it builds a URL, which means an id of `../../admin` turns
+    `/v1/alerts/<id>` into `/admin` -- an authenticated request aimed somewhere
+    the caller never named. Percent-encoding does not help: `URL.build` encodes
+    again, and `joinpath` normalises the same way. So ids are checked instead.
+    """
+
+
+class ProtocolError(AlertRosterError):
+    """The station answered successfully with something unusable.
+
+    Distinct from `StationError`, which carries a real HTTP failure status; a
+    caller branching on `status >= 400` must not meet this one.
+    """
+
+
 class StationError(AlertRosterError):
     """Any other error response from the station (§8).
 
@@ -181,6 +200,18 @@ class AlertRosterClient:
     def with_token(self, token: str) -> Self:
         """Return a client for the same station carrying `token`."""
         return type(self)(self._session, self._host, self._port, token)
+
+    @staticmethod
+    def _alert_segment(alert_id: str) -> str:
+        """Return `alert_id` if it is a single safe path segment.
+
+        The station's ids are opaque (`la_` + a ULID), so anything carrying a
+        separator or resolving to a parent is not an id this client was given
+        by a station -- see `InvalidAlertId`.
+        """
+        if not alert_id or "/" in alert_id or "\\" in alert_id or alert_id in {".", ".."}:
+            raise InvalidAlertId(f"{alert_id!r} is not a usable alert id")
+        return alert_id
 
     def _url(self, path: str) -> URL:
         """Build an absolute URL for a `/v1` path."""
@@ -277,7 +308,7 @@ class AlertRosterClient:
         source_id = body.get("source_id") or body.get("id")
         if not isinstance(token, str) or not isinstance(source_id, str):
             # Never include the body here: on the success path it holds the token.
-            raise StationError(200, "invalid_pair_response")
+            raise ProtocolError("the station's pairing reply had no token or id")
         kind_returned = body.get("kind")
         return PairResult(
             token=token,
@@ -297,7 +328,7 @@ class AlertRosterClient:
 
     async def get_alert(self, alert_id: str) -> dict[str, Any]:
         """One alert of any status, for 24 hours after it closes (§4.3)."""
-        _status, body = await self._request("GET", f"/v1/alerts/{alert_id}")
+        _status, body = await self._request("GET", f"/v1/alerts/{self._alert_segment(alert_id)}")
         return self._alert_from(body)
 
     async def create_alert(
@@ -342,7 +373,9 @@ class AlertRosterClient:
         refuses it for a source token because acknowledging is a person
         answering, and the station returns `403` to anything that tries.
         """
-        _status, body = await self._request("POST", f"/v1/alerts/{alert_id}/resolve")
+        _status, body = await self._request(
+            "POST", f"/v1/alerts/{self._alert_segment(alert_id)}/resolve"
+        )
         return self._alert_from(body)
 
     @staticmethod
@@ -366,8 +399,19 @@ class AlertRosterClient:
         It is yielded like any other event; a caller that ignores it and
         re-seeds from `list_alerts()` is still correct.
 
-        The iterator ends when the station closes the socket. Reconnecting is
-        the caller's business.
+        A station that closes the socket ends the iterator; a station that stops
+        answering raises `CannotConnect`. Those are different outcomes on
+        purpose -- the caller reconnects either way, but only the second is a
+        fault worth saying out loud.
+
+        This is an async generator holding an open socket, so a caller that may
+        abandon it part-way (`break` out of the `async for`) should wrap it in
+        `contextlib.aclosing()`. Without that the socket closes whenever the
+        event loop gets round to finalising the generator, which is not a
+        moment worth depending on.
+
+        Reconnecting, and how long to wait before doing it, is the caller's
+        business.
         """
         try:
             async with self._session.ws_connect(
@@ -377,8 +421,19 @@ class AlertRosterClient:
                 heartbeat=EVENTS_HEARTBEAT,
             ) as socket:
                 async for message in socket:
+                    # aiohttp ends the iteration itself on CLOSE/CLOSING/CLOSED,
+                    # so what arrives here is TEXT, BINARY or ERROR.
+                    if message.type is aiohttp.WSMsgType.ERROR:
+                        # Where a dead connection surfaces: the heartbeat's
+                        # timeout is delivered as an ERROR frame, not raised. A
+                        # `break` here would end the iterator exactly as a clean
+                        # close does and the caller could not tell them apart.
+                        raise CannotConnect(
+                            f"lost the events socket to the AlertRoster station "
+                            f"at {self._host}:{self._port}"
+                        ) from None
                     if message.type is not aiohttp.WSMsgType.TEXT:
-                        break
+                        continue
                     event = self._event_from(message.data)
                     if event is not None:
                         yield event
@@ -391,8 +446,19 @@ class AlertRosterClient:
                 f"the AlertRoster station at {self._host}:{self._port} refused the events socket"
             ) from None
         except aiohttp.ClientError:
+            # Only the upgrade reaches here: once the socket is open, aiohttp
+            # turns a connection error into an ERROR frame rather than raising.
             raise CannotConnect(
-                f"lost the events socket to the AlertRoster station at {self._host}:{self._port}"
+                f"could not open the events socket to the AlertRoster station "
+                f"at {self._host}:{self._port}"
+            ) from None
+        except TimeoutError:
+            # ws_connect takes no connect timeout of its own -- the handshake
+            # runs under the shared session's default -- so a station that
+            # accepts the TCP connection and then says nothing times out here.
+            raise CannotConnect(
+                f"the AlertRoster station at {self._host}:{self._port} "
+                f"did not complete the events socket handshake"
             ) from None
 
     @staticmethod
