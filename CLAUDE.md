@@ -13,16 +13,18 @@ alerts on it from automations, and fires HA events when an alert is acknowledged
 M0–M6 milestone table. Read it before adding anything — it records decisions (and non-goals)
 that are not visible in the code.
 
-**Current state: partway through M3.** `api.py` is the wire client; `config_flow.py` pairs
+**Current state: M3 complete, starting M4.** `api.py` is the wire client; `config_flow.py` pairs
 manually — `user` (host/port + reachability probe) then `pair` (8-digit code → source token) —
 and re-pairs through `reauth_confirm` when a token is revoked; `services.py` has `raise` and
 `resolve`; `connection.py` holds the events socket open per entry, seeding from
 `GET /v1/alerts` on setup and after every reconnect; `events.py` turns each transition into the
 bus event §3.4 names, so an automation can trigger on `alertroster_unacknowledged` today;
 `config_flow.py`'s `zeroconf` step turns an announcement into a discovery card, keyed on the
-station's name rather than its address for the reasons §3.1 now records. Still missing: every
-entity platform, so `PLATFORMS` is still empty and no *entity* yet listens to
-`StationConnection`.
+station's name rather than its address for the reasons §3.1 now records; `event.py` is the first
+entity platform — `event.<station>_alert`, on a device per station, built on the
+`AlertRosterEntity` base in `entity.py` that the M4 entities inherit (device keyed on `entry_id`,
+`unavailable` whenever the socket is down). Still missing: the M4 entities themselves — the
+`alerting` / `connected` binary sensors and the `open_alerts` sensor.
 
 Tests run against a fake station that is a **real `aiohttp` server** on a loopback port
 (`tests/conftest.py`), not a mocked client — `pytest-socket` blocks everything else, which is
