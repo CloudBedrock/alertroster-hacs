@@ -78,6 +78,11 @@ ATTR_ALERT = "alert"
 ATTR_STATION = "station"
 ATTR_ENTRY_ID = "entry_id"
 
+# The open-alert sensor's attribute: the alerts behind its count (§3.5). Plural
+# and distinct from `ATTR_ALERT`, which is the single alert a transition
+# carried -- one is what just happened, the other is everything still open.
+ATTR_ALERTS = "alerts"
+
 # The same transitions as the `event` entity spells them (§3.5). Derived from
 # `BUS_EVENTS` rather than written out a second time: an entity's event types
 # are namespaced by the entity, so they are the bus names without the domain in

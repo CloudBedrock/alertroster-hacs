@@ -151,6 +151,17 @@ class StationConnection:
         """
         return [copy.deepcopy(alert) for alert in self._alerts.values()]
 
+    @property
+    def open_alert_count(self) -> int:
+        """How many alerts this source has open, without copying any of them.
+
+        `open_alerts` deep-copies the whole set, which is the right thing for
+        a caller that is going to hand them to a template and the wrong thing
+        for one that only wants to know whether there are any: the binary
+        sensor asks this on every frame the station sends.
+        """
+        return len(self._alerts)
+
     @callback
     def async_add_listener(self, update: CALLBACK_TYPE) -> CALLBACK_TYPE:
         """Register `update`, and return the callable that unregisters it."""
