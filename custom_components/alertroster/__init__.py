@@ -1,9 +1,12 @@
 """AlertRoster: raise alerts on a local receiver station, and react when nobody answers.
 
-Entry setup is deliberately thin at this milestone: it builds the one client
-the entry owns and hands it to the services. The events socket, the reconnect
-loop and the entities are AHA-16 and the M4 issues, which is why `PLATFORMS`
-is still empty and nothing here holds state that could go stale.
+Entry setup builds the one client the entry owns, hands it to the services, and
+starts the connection that holds the station's events socket open. The entities
+that will listen to that connection are the M4 issues, which is why `PLATFORMS`
+is still empty.
+
+Setup does not wait for the station to answer -- `connection.py` explains why
+that is a decision rather than an oversight.
 """
 
 from __future__ import annotations
@@ -18,6 +21,7 @@ from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.typing import ConfigType
 
 from .api import AlertRosterClient
+from .connection import StationConnection
 from .const import DOMAIN
 from .services import async_setup_services
 
@@ -41,6 +45,7 @@ class AlertRosterData:
     """
 
     client: AlertRosterClient
+    connection: StationConnection
 
 
 type AlertRosterConfigEntry = ConfigEntry[AlertRosterData]
@@ -59,18 +64,30 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
 
 async def async_setup_entry(hass: HomeAssistant, entry: AlertRosterConfigEntry) -> bool:
     """Set up AlertRoster from a config entry."""
-    entry.runtime_data = AlertRosterData(
-        client=AlertRosterClient(
-            async_get_clientsession(hass),
-            entry.data[CONF_HOST],
-            entry.data[CONF_PORT],
-            entry.data[CONF_TOKEN],
-        )
+    client = AlertRosterClient(
+        async_get_clientsession(hass),
+        entry.data[CONF_HOST],
+        entry.data[CONF_PORT],
+        entry.data[CONF_TOKEN],
     )
+    connection = StationConnection(hass, entry, client)
+    entry.runtime_data = AlertRosterData(client=client, connection=connection)
+
+    # Platforms first: an entity that is added after the connection has already
+    # seeded still reads the current state when it is added, but one added
+    # before cannot miss the notification that follows.
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
+    connection.async_start()
     return True
 
 
 async def async_unload_entry(hass: HomeAssistant, entry: AlertRosterConfigEntry) -> bool:
-    """Unload a config entry."""
-    return await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
+    """Unload a config entry, closing the events socket before returning.
+
+    Only when the platforms actually unloaded: Home Assistant keeps the entry
+    loaded if they did not, and an entry that is still loaded needs its socket.
+    """
+    if not await hass.config_entries.async_unload_platforms(entry, PLATFORMS):
+        return False
+    await entry.runtime_data.connection.async_stop()
+    return True
