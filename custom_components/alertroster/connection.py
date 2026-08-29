@@ -41,6 +41,7 @@ import contextlib
 import copy
 import logging
 import random
+from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
 
 from homeassistant.core import CALLBACK_TYPE, HomeAssistant, callback
@@ -97,6 +98,12 @@ class StationConnection:
         self._entry = entry
         self._client = client
         self._listeners: set[CALLBACK_TYPE] = set()
+        # Separate from `_listeners` because these are handed the frame. A
+        # listener is told only *that* something changed and reads the state
+        # back; a transition cannot be recovered that way -- by the time an
+        # `alert.expired` has been folded in, the alert is simply gone from the
+        # set, indistinguishable from one that was resolved.
+        self._transitions: set[Callable[[StationEvent], None]] = set()
         self._task: asyncio.Task[None] | None = None
         self._connected = False
         self._failures = 0
@@ -146,6 +153,25 @@ class StationConnection:
         @callback
         def remove() -> None:
             self._listeners.discard(update)
+
+        return remove
+
+    @callback
+    def async_add_transition_listener(
+        self, transition: Callable[[StationEvent], None]
+    ) -> CALLBACK_TYPE:
+        """Register `transition` for every frame, and return its unregister.
+
+        Every frame, not every *known* transition: this class does not decide
+        which station events mean something. `events.py` owns the mapping to
+        Home Assistant's bus and ignores what is not in it, so a station that
+        grows a new event under §9 needs a change in one place rather than two.
+        """
+        self._transitions.add(transition)
+
+        @callback
+        def remove() -> None:
+            self._transitions.discard(transition)
 
         return remove
 
@@ -228,7 +254,12 @@ class StationConnection:
                         self._client.events(self._async_on_connect)
                     ) as events:
                         async for event in events:
+                            # State first: an automation woken by the bus event
+                            # reads `open_alerts` through a template, and it
+                            # must see the set the transition just produced,
+                            # not the one before it.
                             self._async_apply(event)
+                            self._async_dispatch(event)
                 except InvalidAuth:
                     self._async_set_connected(False)
                     # No token, no station name, no URL -- just which entry. §3.6
@@ -321,9 +352,12 @@ class StationConnection:
     def _async_apply(self, event: StationEvent) -> None:
         """Fold one frame into the open-alert set.
 
-        Turning transitions into Home Assistant bus events is AHA-17's job and
-        is deliberately not done here; this only keeps the set of open alerts
-        honest between one seed and the next.
+        Only the set of open alerts, kept honest between one seed and the next.
+        Turning transitions into Home Assistant bus events is `events.py`'s
+        job, reached through `_async_dispatch`: this method is allowed to
+        swallow a frame it cannot use for state -- an alert with no id, say --
+        and a transition that fired no bus event because of that would be the
+        expiry nobody heard.
         """
         if event.alerts is not None:
             # The shipped service's join `snapshot` -- a divergence from §4.6,
@@ -377,6 +411,26 @@ class StationConnection:
                 _LOGGER.exception(
                     "An AlertRoster listener for %s raised while being notified",
                     self._entry.title,
+                )
+
+    @callback
+    def _async_dispatch(self, event: StationEvent) -> None:
+        """Hand one frame to every transition listener.
+
+        Guarded exactly as `_async_notify` is, and for a sharper reason: what
+        these listeners do is fire the bus events §3.4 exists for, and one of
+        them raising must not stop the others or end the socket task. An
+        expiry nobody heard is the failure this integration was written to
+        prevent.
+        """
+        for transition in list(self._transitions):
+            try:
+                transition(event)
+            except Exception:
+                _LOGGER.exception(
+                    "An AlertRoster transition listener for %s raised on %r",
+                    self._entry.title,
+                    event.event,
                 )
 
     def _next_backoff(self) -> float:
