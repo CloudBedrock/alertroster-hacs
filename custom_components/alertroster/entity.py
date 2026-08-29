@@ -64,6 +64,10 @@ class AlertRosterEntity(Entity):
             name=entry.title,
             manufacturer=DEVICE_MANUFACTURER,
             model=DEVICE_MODEL,
+            # No `sw_version`: the station's version is only ever offered by
+            # `GET /v1/discover`, which the shipped station answers with a 404
+            # (REQUIREMENTS.md §5 item 1). Nothing on an authenticated path
+            # carries it, so there is nothing honest to put here yet.
         )
 
     @property
