@@ -231,8 +231,21 @@ class AlertRosterClient:
         return alert_id
 
     def _url(self, path: str) -> URL:
-        """Build an absolute URL for a `/v1` path."""
-        return URL.build(scheme="http", host=self._host, port=self._port, path=path)
+        """Build an absolute URL for a `/v1` path.
+
+        A host that cannot form a URL at all -- empty, or carrying the scheme
+        or the `:port` someone pasted in from a browser -- makes `URL.build`
+        raise `ValueError`. Left alone that escapes from the middle of a
+        request, past every caller's `except CannotConnect`, as a bare
+        `ValueError`. Unreachable is what it means to the caller, so that is
+        what it is turned into here, once, rather than at each call site.
+        """
+        try:
+            return URL.build(scheme="http", host=self._host, port=self._port, path=path)
+        except ValueError:
+            raise CannotConnect(
+                f"{self._host!r} is not a usable address for an AlertRoster station"
+            ) from None
 
     def _auth_headers(self) -> dict[str, str]:
         """Bearer header for an authenticated request (§6.1 step 4)."""
