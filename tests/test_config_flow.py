@@ -12,6 +12,7 @@ import logging
 from collections.abc import Iterator
 from ipaddress import ip_address
 from typing import Any
+from unittest.mock import patch
 
 import pytest
 import pytest_socket
@@ -23,7 +24,11 @@ from homeassistant.data_entry_flow import FlowResultType
 from homeassistant.helpers.service_info.zeroconf import ZeroconfServiceInfo
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
-from custom_components.alertroster.config_flow import _announced_addresses, _is_usable_host
+from custom_components.alertroster.config_flow import (
+    AlertRosterConfigFlow,
+    _announced_addresses,
+    _is_usable_host,
+)
 from custom_components.alertroster.const import (
     CONF_SOURCE_ID,
     CONF_STATION_NAME,
@@ -500,6 +505,24 @@ async def test_the_replacement_token_reaches_no_log_record(
 # -- discovery (AHA-6) ----------------------------------------------------
 
 
+def _probe(answers: bool) -> Any:
+    """Say what the reachability probe would have found, instead of finding out.
+
+    These tests are about which entry an announcement is matched to and what is
+    written back, not about whether an address answers -- that has its own
+    tests against the real fake station. It has to be stubbed because
+    `pytest-socket` allows only loopback, so an entry stored at `10.0.0.4` or
+    `studio.local` cannot be probed for real, and what the block raises is not
+    the `CannotConnect` a dead address gives.
+    """
+    return patch.object(
+        AlertRosterConfigFlow,
+        "_async_reachable_address",
+        autospec=True,
+        side_effect=lambda _self, addresses, _port: addresses[0] if answers else None,
+    )
+
+
 async def test_a_discovered_station_pairs_and_is_named_by_its_txt_record(
     hass: HomeAssistant, station: FakeStation
 ) -> None:
@@ -600,15 +623,14 @@ async def test_a_station_added_by_hand_is_matched_by_address_and_gains_its_name(
     entry = MockConfigEntry(
         domain=DOMAIN,
         unique_id=station.source_id,
-        data={
-            CONF_HOST: station.host,
-            CONF_PORT: station.port,
-            CONF_STATION_NAME: None,
-        },
+        data={CONF_HOST: "10.0.0.4", CONF_PORT: station.port, CONF_STATION_NAME: None},
     )
     entry.add_to_hass(hass)
 
-    result = await _discover(hass, _announcement(station.host, station.port))
+    with _probe(answers=True):
+        result = await _discover(
+            hass, _announcement(station.host, station.port, extra_addresses=["10.0.0.4"])
+        )
     await hass.async_block_till_done()
 
     assert result["type"] is FlowResultType.ABORT
@@ -686,25 +708,155 @@ async def test_the_first_announced_address_that_answers_is_the_one_used(
 
 
 @pytest.mark.parametrize(
-    ("announced", "expected"),
+    ("leads", "announced", "expected"),
     [
-        (["10.0.0.4"], ["10.0.0.4"]),
+        ("10.0.0.4", ["10.0.0.4"], ["10.0.0.4"]),
         # Loopback is kept but demoted: on another machine it is Home
         # Assistant itself, not the station.
-        (["127.0.0.1", "10.0.0.4"], ["10.0.0.4", "127.0.0.1"]),
+        ("127.0.0.1", ["127.0.0.1", "10.0.0.4"], ["10.0.0.4", "127.0.0.1"]),
         # `fe80::` needs a scope id the announcement does not carry.
-        (["fe80::1", "10.0.0.4"], ["10.0.0.4"]),
-        (["10.0.0.4", "10.0.0.4"], ["10.0.0.4"]),
-        (["fe80::1"], []),
+        ("fe80::1", ["fe80::1", "10.0.0.4"], ["10.0.0.4"]),
+        ("10.0.0.4", ["10.0.0.4", "10.0.0.4"], ["10.0.0.4"]),
+        ("fe80::1", ["fe80::1"], []),
+        # The address Home Assistant already settled on goes first, wherever
+        # it happens to sit in the announcement.
+        ("10.0.0.5", ["10.0.0.4", "10.0.0.5"], ["10.0.0.5", "10.0.0.4"]),
     ],
-    ids=["one address", "loopback last", "link-local dropped", "deduplicated", "nothing usable"],
+    ids=[
+        "one address",
+        "loopback last",
+        "link-local dropped",
+        "deduplicated",
+        "nothing usable",
+        "the chosen address leads",
+    ],
 )
 def test_which_announced_addresses_are_worth_trying(
-    announced: list[str], expected: list[str]
+    leads: str, announced: list[str], expected: list[str]
 ) -> None:
     """The ordering `_async_reachable_address` then walks."""
     info = _announcement("10.0.0.4", DEFAULT_PORT)
-    info.ip_address = ip_address(announced[0])
+    info.ip_address = ip_address(leads)
     info.ip_addresses = [ip_address(a) for a in announced]
 
     assert _announced_addresses(info) == expected
+
+
+async def test_an_ignored_station_stays_ignored(hass: HomeAssistant, station: FakeStation) -> None:
+    """Ignore is keyed on the name, which is the one entry with no data at all.
+
+    Without the unique-id check the discovery card would come back every time
+    the station announced, which is the opposite of what Ignore means.
+    """
+    result = await _discover(hass, _announcement(station.host, station.port))
+    assert result["step_id"] == "pair"
+
+    await hass.config_entries.flow.async_init(
+        DOMAIN,
+        context={"source": config_entries.SOURCE_IGNORE},
+        data={"unique_id": "studio", "title": "studio"},
+    )
+    await hass.async_block_till_done()
+
+    again = await _discover(hass, _announcement(station.host, station.port))
+
+    assert again["type"] is FlowResultType.ABORT
+    assert again["reason"] == "already_configured"
+
+
+async def test_a_station_paired_by_hostname_is_not_offered_twice(
+    hass: HomeAssistant, station: FakeStation
+) -> None:
+    """The manual step invites `studio.local`, so an announcement has to know it.
+
+    A missed match here is not a redundant card: pairing through it mints a
+    second `source_id`, and a second `source_id` is a second entry and a second
+    events socket for one station, which no unique id would catch.
+    """
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        unique_id=station.source_id,
+        data={CONF_HOST: "studio.local", CONF_PORT: station.port, CONF_STATION_NAME: None},
+    )
+    entry.add_to_hass(hass)
+
+    with _probe(answers=True):
+        result = await _discover(hass, _announcement(station.host, station.port))
+    await hass.async_block_till_done()
+
+    assert result["type"] is FlowResultType.ABORT
+    assert result["reason"] == "already_configured"
+    assert len(hass.config_entries.async_entries(DOMAIN)) == 1
+
+
+async def test_an_unrelated_station_announcing_loopback_is_not_mistaken_for_this_one(
+    hass: HomeAssistant, station: FakeStation
+) -> None:
+    """`127.0.0.1` says nothing about *which* station announced it."""
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        unique_id="src_some_other_station",
+        data={CONF_HOST: "127.0.0.1", CONF_PORT: station.port, CONF_STATION_NAME: None},
+    )
+    entry.add_to_hass(hass)
+
+    result = await _discover(
+        hass, _announcement(station.host, station.port, name="a different station")
+    )
+
+    # Offered as its own station rather than swallowed into the entry above.
+    assert result["type"] is FlowResultType.FORM
+    assert result["step_id"] == "pair"
+    assert entry.data[CONF_STATION_NAME] is None
+
+
+async def test_a_paired_station_that_still_answers_keeps_the_address_it_has(
+    hass: HomeAssistant, station: FakeStation
+) -> None:
+    """A station re-announces on a timer, and `ip_addresses` reorders between
+    announcements. Repointing the entry at whichever address answered first
+    would hand it a different host every few minutes, and every change is a
+    reload -- the events socket dropped and rebuilt for nothing."""
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        unique_id=station.source_id,
+        data={
+            CONF_HOST: "studio.local",
+            CONF_PORT: station.port,
+            CONF_STATION_NAME: "studio",
+        },
+    )
+    entry.add_to_hass(hass)
+
+    with _probe(answers=True):
+        result = await _discover(hass, _announcement(station.host, station.port))
+    await hass.async_block_till_done()
+
+    assert result["reason"] == "already_configured"
+    # Left exactly as the user typed it, not rewritten to today's IP address.
+    assert entry.data[CONF_HOST] == "studio.local"
+
+
+async def test_a_paired_station_that_announces_but_does_not_answer_keeps_its_address(
+    hass: HomeAssistant, station: FakeStation, unused_tcp_port: int
+) -> None:
+    """Nothing answered, so there is no better address to write down."""
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        unique_id=station.source_id,
+        data={
+            CONF_HOST: "10.0.0.9",
+            CONF_PORT: unused_tcp_port,
+            CONF_STATION_NAME: "studio",
+        },
+    )
+    entry.add_to_hass(hass)
+
+    with _probe(answers=False):
+        result = await _discover(hass, _announcement(station.host, unused_tcp_port))
+    await hass.async_block_till_done()
+
+    assert result["type"] is FlowResultType.ABORT
+    assert result["reason"] == "already_configured"
+    assert entry.data[CONF_HOST] == "10.0.0.9"
+    assert entry.data[CONF_PORT] == unused_tcp_port
