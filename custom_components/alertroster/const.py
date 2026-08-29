@@ -49,6 +49,17 @@ BUS_EVENTS: Mapping[str, str] = MappingProxyType(
     }
 )
 
-# Keys of the event data each of those carries.
+# Keys of the event data each of those carries. `station` is the entry's
+# friendly name, for rendering; `entry_id` is what an automation should filter
+# on. AHA-35 split them: a name is user-editable and not unique, so two entries
+# called "studio" are indistinguishable on the bus and a template matching on
+# the name breaks the moment somebody renames the entry.
+#
+# The stable half is the config entry id rather than `source_id`, which is the
+# other identifier on hand: §6.2 mints a new source row for every pairing, so
+# `source_id` changes when a revoked token is re-paired through reauth
+# (`config_flow.py` moves the unique id with it). `entry_id` survives both a
+# rename and a re-pair, which is the whole point of carrying it.
 ATTR_ALERT = "alert"
 ATTR_STATION = "station"
+ATTR_ENTRY_ID = "entry_id"

@@ -32,7 +32,7 @@ from homeassistant.core import CALLBACK_TYPE, HomeAssistant, callback
 
 from .api import StationEvent
 from .connection import StationConnection
-from .const import ATTR_ALERT, ATTR_STATION, BUS_EVENTS
+from .const import ATTR_ALERT, ATTR_ENTRY_ID, ATTR_STATION, BUS_EVENTS
 
 if TYPE_CHECKING:
     from . import AlertRosterConfigEntry
@@ -82,8 +82,10 @@ def async_setup_station_events(
                 ATTR_ALERT: copy.deepcopy(event.alert),
                 # Read now rather than captured at setup, so an entry renamed
                 # in the UI is named correctly by the next event rather than
-                # from the next restart.
+                # from the next restart. Which is also why the name is not
+                # something to match on -- `entry_id` is (see `const.py`).
                 ATTR_STATION: entry.title,
+                ATTR_ENTRY_ID: entry.entry_id,
             },
         )
 
