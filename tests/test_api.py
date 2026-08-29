@@ -387,6 +387,11 @@ async def test_events_leaves_no_heartbeat_timer_when_abandoned(
 
     async with contextlib.aclosing(client.events()) as events:
         async for _event in events:
+            # Proves the detector detects. Without this the test passes green
+            # if aiohttp ever renames `_send_heartbeat` -- the exact rename
+            # `_cancel_heartbeat` is written to survive -- because both counts
+            # would then be zero and the leak would be back unnoticed.
+            assert live_heartbeats() > before
             break
 
     # A tick, because the reschedule this guards against is a `call_soon`.
