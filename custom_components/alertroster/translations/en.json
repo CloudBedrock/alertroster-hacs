@@ -3,16 +3,21 @@
     "step": {
       "user": {
         "title": "Connect to an AlertRoster station",
-        "data": { "host": "Host", "port": "Port" }
+        "data": {
+          "host": "Host",
+          "port": "Port"
+        }
       },
       "pair": {
         "title": "Pair with {name}",
         "description": "On the station open Service → Pairing → Pair a new source, then enter the 8-digit code shown there.",
-        "data": { "code": "Pairing code" }
+        "data": {
+          "code": "Pairing code"
+        }
       }
     },
     "error": {
-      "invalid_host": "That is not a host name or IP address. Enter just the address (for example 10.0.0.4 or studio.local) \u2014 no http:// and no :port; the port goes in its own field.",
+      "invalid_host": "That is not a host name or IP address. Enter just the address (for example 10.0.0.4 or studio.local) — no http:// and no :port; the port goes in its own field.",
       "cannot_connect": "Could not reach the station. Is 'Accept sources from the LAN' turned on in its Pairing screen?",
       "window_closed": "The station's pairing window is not open. Open Pairing on the station and try again.",
       "invalid_code": "That code was not accepted.",
@@ -21,6 +26,64 @@
     },
     "abort": {
       "already_configured": "This station is already paired."
+    }
+  },
+  "services": {
+    "raise": {
+      "name": "Raise an alert",
+      "description": "Raises an alert on a paired AlertRoster station, which pages whoever is on it. Returns the alert, so a later Resolve can use its ID.",
+      "fields": {
+        "config_entry": {
+          "name": "Station",
+          "description": "Which paired station to raise the alert on. Optional when only one is paired."
+        },
+        "title": {
+          "name": "Title",
+          "description": "The one line the person answering sees first."
+        },
+        "detail": {
+          "name": "Detail",
+          "description": "Anything more the person answering should know."
+        },
+        "urgency": {
+          "name": "Urgency",
+          "description": "How hard the station should page. The station decides what each level does."
+        },
+        "dedup_key": {
+          "name": "Deduplication key",
+          "description": "Raising again with the same key while the alert is still open succeeds and returns the existing alert instead of a second one, so a retrying automation is safe. It does not update the alert: to change one, resolve it and raise a new one."
+        },
+        "ack_timeout_seconds": {
+          "name": "Acknowledgement timeout",
+          "description": "How long the station waits for someone to answer before the alert expires. Leave empty to use the station's own default."
+        }
+      }
+    },
+    "resolve": {
+      "name": "Resolve an alert",
+      "description": "Tells the station the condition cleared. Give either the alert ID or the deduplication key.",
+      "fields": {
+        "config_entry": {
+          "name": "Station",
+          "description": "Which paired station the alert is on. Optional when only one is paired."
+        },
+        "alert_id": {
+          "name": "Alert ID",
+          "description": "The ID returned when the alert was raised."
+        },
+        "dedup_key": {
+          "name": "Deduplication key",
+          "description": "The key the alert was raised with, if you did not keep its ID."
+        }
+      }
+    }
+  },
+  "selector": {
+    "urgency": {
+      "options": {
+        "high": "High",
+        "low": "Low"
+      }
     }
   }
 }
