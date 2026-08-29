@@ -107,8 +107,12 @@ async def test_raise_passes_ack_timeout_through_and_defaults_urgency(
     defaulted = await _raise(hass, title="B")
 
     assert passed["ack_timeout_seconds"] == 45
-    assert passed["urgency"] == "high"
-    # Not sent, so the station applied its own default rather than ours.
+    # Asserted on what was *sent*: the fake applies "high" itself when the
+    # field is absent, so reading it back off the alert would hold even with
+    # the schema default deleted.
+    assert station.created[0]["urgency"] == "high"
+    assert "ack_timeout_seconds" not in station.created[1]
+    # Omitted, so the station applied its own default rather than ours.
     assert defaulted["ack_timeout_seconds"] == 120
 
 
@@ -131,6 +135,24 @@ async def test_raise_rejects_an_urgency_the_station_does_not_have(
         await _raise(hass, title="A", urgency="screaming")
 
     # Rejected before anything was sent, not by the station.
+    assert ("POST", "/v1/alerts") not in station.requests
+
+
+@pytest.mark.parametrize("bad", [0, -1, 86_401])
+async def test_ack_timeout_is_bounded_the_way_the_form_bounds_it(
+    hass: HomeAssistant, station: FakeStation, bad: int
+) -> None:
+    """The schema has to agree with services.yaml, not just the UI.
+
+    The selector refuses anything outside 1..86400, but a YAML automation never
+    meets the selector -- so without the same bound in the schema, `0` reaches
+    the station through a door the form keeps shut.
+    """
+    await _setup(hass, station)
+
+    with pytest.raises(vol.Invalid):
+        await _raise(hass, title="A", ack_timeout_seconds=bad)
+
     assert ("POST", "/v1/alerts") not in station.requests
 
 
@@ -161,15 +183,24 @@ async def test_resolve_by_alert_id(hass: HomeAssistant, station: FakeStation) ->
     assert station.alerts[alert["id"]]["status"] == "resolved"
 
 
-async def test_resolve_by_dedup_key(hass: HomeAssistant, station: FakeStation) -> None:
-    """For an automation that raised with a key and kept no id."""
+async def test_resolve_by_dedup_key_picks_the_matching_alert(
+    hass: HomeAssistant, station: FakeStation
+) -> None:
+    """For an automation that raised with a key and kept no id.
+
+    Two alerts are open, because with only one the lookup could return
+    whatever it liked -- "resolve the newest" would pass just as well.
+    """
     await _setup(hass, station)
-    alert = await _raise(hass, title="Garage door open", dedup_key="garage")
+    garage = await _raise(hass, title="Garage door open", dedup_key="garage")
+    boiler = await _raise(hass, title="Boiler pressure low", dedup_key="boiler")
 
     resolved = await _resolve(hass, dedup_key="garage")
 
-    assert resolved["id"] == alert["id"]
+    assert resolved["id"] == garage["id"]
     assert resolved["status"] == "resolved"
+    # The one nobody named is untouched.
+    assert station.alerts[boiler["id"]]["status"] == "triggered"
 
 
 @pytest.mark.parametrize(
@@ -271,10 +302,51 @@ async def test_naming_the_station_picks_it(hass: HomeAssistant, station: FakeSta
 async def test_a_config_entry_that_is_not_a_station_is_refused(
     hass: HomeAssistant, station: FakeStation
 ) -> None:
-    """A stale entry id in an automation must not reach the wire."""
+    """A stale entry id in an automation must not reach the wire.
+
+    `match` pins which guard fired. The foreign entry is deliberately left
+    un-set-up: the domain check runs before the loaded check, so this still
+    proves the domain guard, and actually setting up `sun` would drag its
+    platform's timers into the test for nothing.
+    """
     await _setup(hass, station)
     other = MockConfigEntry(domain="sun", title="Sun")
     other.add_to_hass(hass)
 
-    with pytest.raises(ServiceValidationError):
+    with pytest.raises(ServiceValidationError, match="not an AlertRoster station"):
         await _raise(hass, title="A", config_entry=other.entry_id)
+
+
+async def test_with_no_station_set_up_at_all(hass: HomeAssistant) -> None:
+    """What an automation hits once the last entry is removed."""
+    from custom_components.alertroster import async_setup as _register
+
+    await _register(hass, {})
+
+    with pytest.raises(ServiceValidationError, match="no AlertRoster station"):
+        await _raise(hass, title="A")
+
+
+async def test_targeting_a_station_that_is_not_loaded(
+    hass: HomeAssistant, station: FakeStation
+) -> None:
+    """A disabled entry is still a valid id, and still cannot be paged."""
+    loaded = await _setup(hass, station, title="studio")
+    await hass.config_entries.async_unload(loaded.entry_id)
+    await hass.async_block_till_done()
+
+    with pytest.raises(ServiceValidationError, match="not loaded"):
+        await _raise(hass, title="A", config_entry=loaded.entry_id)
+
+
+async def test_an_alert_id_that_would_redirect_the_request_is_user_error(
+    hass: HomeAssistant, station: FakeStation
+) -> None:
+    """`InvalidAlertId` never left the process, so it must not blame a station."""
+    await _setup(hass, station, title="studio")
+
+    with pytest.raises(ServiceValidationError) as err:
+        await _resolve(hass, alert_id="../../admin")
+
+    assert "studio" not in str(err.value)
+    assert not [r for r in station.requests if r[0] == "POST"]
