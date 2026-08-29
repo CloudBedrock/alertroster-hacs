@@ -140,7 +140,7 @@ Hosting and repo:
 - Exactly one integration under `custom_components/<domain>/`.
 - `manifest.json` with `domain`, `name`, `version`, `documentation`, `issue_tracker`,
   `codeowners`, `integration_type`, `iot_class`, `config_flow`, `zeroconf`.
-- `brand/icon.png` (256×256) and `brand/icon@2x.png` (512×512) in the repo. (HA ≥ 2026.3 reads
+- `custom_components/alertroster/brand/icon.png` (256×256) and `icon@2x.png` (512×512) — HACS looks inside the integration directory, not the repo root. (HA ≥ 2026.3 reads
   these from the integration itself; for the default store and older HA, the same images are
   also submitted to `home-assistant/brands` under `custom_integrations/alertroster/`.)
 - A GitHub **release** (not just a tag) per version; HACS shows the last five.
