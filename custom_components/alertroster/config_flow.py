@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Mapping
+from ipaddress import ip_address
 from typing import Any
 
 import voluptuous as vol
@@ -192,34 +193,20 @@ class AlertRosterConfigFlow(ConfigFlow, domain=DOMAIN):
             return self.async_abort(reason="cannot_connect")
 
         # Dedupes repeat announcements: `raise_on_progress` aborts the second
-        # one while the first is still on screen.
+        # one while the first is still on screen. The unique id is only the
+        # station's name for the length of this flow -- `_async_finish`
+        # replaces it with the `source_id` before the entry is created.
         await self.async_set_unique_id(name)
+        # The one kind of entry that *is* keyed on the name: "Ignore" stores
+        # the flow's unique id and no data at all, so neither pass in
+        # `_async_paired_station` would see it and an ignored station would
+        # come back every time it announced.
+        self._abort_if_unique_id_configured()
 
-        host = await self._async_reachable_address(addresses, port)
+        if (entry := self._async_paired_station(name, discovery_info)) is not None:
+            return await self._async_follow_station(entry, name, addresses, port)
 
-        if (entry := self._async_paired_station(name, addresses, port)) is not None:
-            # §3.1: rediscovery of a paired station is ignored, except that a
-            # station which moved gets its new address written through --
-            # otherwise the entry keeps pointing at where it used to be. The
-            # name is backfilled for entries added by hand, which have none, so
-            # the *next* move is matchable by name rather than by an address
-            # that has already changed.
-            updates: dict[str, Any] = {CONF_STATION_NAME: name}
-            if host is not None:
-                updates[CONF_HOST] = host
-                updates[CONF_PORT] = port
-            return self.async_update_reload_and_abort(
-                entry,
-                data_updates=updates,
-                reason="already_configured",
-                # A station re-announces on a timer. Reloading an entry that
-                # did not change would drop and rebuild the events socket every
-                # time it did, which is a working integration restarting itself
-                # for no reason.
-                reload_even_if_entry_is_unchanged=False,
-            )
-
-        if host is None:
+        if (host := await self._async_reachable_address(addresses, port)) is None:
             return self.async_abort(reason="cannot_connect")
 
         self._host = host
@@ -229,8 +216,54 @@ class AlertRosterConfigFlow(ConfigFlow, domain=DOMAIN):
         self.context["title_placeholders"] = {"name": name}
         return await self.async_step_pair()
 
+    async def _async_follow_station(
+        self, entry: ConfigEntry, name: str, addresses: list[str], port: int
+    ) -> ConfigFlowResult:
+        """Leave a paired station alone, except for what has actually moved.
+
+        §3.1 ignores the rediscovery of a paired station, but an entry pointing
+        at where the station used to be is not much use, so an address that
+        changed is written through.
+
+        The address is only rewritten when the stored one has stopped
+        answering. Checking that first is what keeps this quiet: a station
+        re-announces on a timer, `ip_addresses` is ordered most-recently-
+        updated-first so its order moves between announcements, and picking the
+        first address that answers each time would hand the entry a different
+        host every few minutes -- each one a change, each change a reload, each
+        reload the events socket dropped and rebuilt for nothing. It also
+        leaves a host somebody typed as `studio.local` alone rather than
+        quietly replacing it with today's IP address.
+        """
+        updates: dict[str, Any] = {}
+        if entry.data.get(CONF_STATION_NAME) != name:
+            # Backfilled for entries added by hand, which have no name stored,
+            # so the next move is matchable by name rather than by an address
+            # that has already changed.
+            updates[CONF_STATION_NAME] = name
+
+        stored_host = entry.data.get(CONF_HOST)
+        still_answering = (
+            isinstance(stored_host, str)
+            and entry.data.get(CONF_PORT) == port
+            and await self._async_reachable_address([stored_host], port) is not None
+        )
+        if not still_answering and (host := await self._async_reachable_address(addresses, port)):
+            updates[CONF_HOST] = host
+            updates[CONF_PORT] = port
+
+        return self.async_update_reload_and_abort(
+            entry,
+            data_updates=updates,
+            reason="already_configured",
+            # Nothing changed on most announcements, and reloading an unchanged
+            # entry would drop and rebuild the events socket every time one
+            # arrived: a working integration restarting itself for no reason.
+            reload_even_if_entry_is_unchanged=False,
+        )
+
     async def _async_reachable_address(self, addresses: list[str], port: int) -> str | None:
-        """The first announced address that answers, or `None` if none do."""
+        """The first of `addresses` that answers, or `None` if none do."""
         session = async_get_clientsession(self.hass)
         for address in addresses:
             try:
@@ -241,20 +274,45 @@ class AlertRosterConfigFlow(ConfigFlow, domain=DOMAIN):
         return None
 
     def _async_paired_station(
-        self, name: str, addresses: list[str], port: int
+        self, name: str, discovery_info: ZeroconfServiceInfo
     ) -> ConfigEntry | None:
         """The entry already paired with this station, if there is one.
 
-        By name first, because that is what survives the station moving. The
-        address pass is for entries added through the manual step, which have
-        no name stored until this step backfills one.
+        By name first, because that is the only thing that survives the station
+        moving. The rest is for entries added through the manual step, which
+        have no name stored until the first announcement backfills one, and so
+        can only be recognised by where they point.
+
+        Both the announced addresses and the announced hostname are compared,
+        because the manual step invites either: its error text tells people to
+        enter "10.0.0.4 or studio.local". Missing one of those would not merely
+        show a redundant discovery card -- pairing through it mints a second
+        `source_id`, which is a second entry and a second events socket for one
+        station, and no unique id would catch it.
+
+        Loopback is left out of the comparison even though the probe still
+        tries it: `127.0.0.1` is the one address that says nothing about *which*
+        station is being announced, so an entry stored against it would match
+        the first station on the LAN to announce loopback on the same port.
         """
+        hostname = discovery_info.hostname.rstrip(".").casefold()
+        where = {
+            address
+            for address in _announced_addresses(discovery_info)
+            if not ip_address(address).is_loopback
+        }
+
         entries = self._async_current_entries(include_ignore=False)
         for entry in entries:
             if entry.data.get(CONF_STATION_NAME) == name:
                 return entry
         for entry in entries:
-            if entry.data.get(CONF_HOST) in addresses and entry.data.get(CONF_PORT) == port:
+            if entry.data.get(CONF_PORT) != discovery_info.port:
+                continue
+            host = entry.data.get(CONF_HOST)
+            if not isinstance(host, str):
+                continue
+            if host in where or host.rstrip(".").casefold() == hostname:
                 return entry
         return None
 
