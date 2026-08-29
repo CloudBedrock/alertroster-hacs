@@ -505,8 +505,8 @@ async def test_the_replacement_token_reaches_no_log_record(
 # -- discovery (AHA-6) ----------------------------------------------------
 
 
-def _probe(answers: bool) -> Any:
-    """Say what the reachability probe would have found, instead of finding out.
+def _probe(*reachable: str) -> Any:
+    """Say which addresses answer, instead of going and finding out.
 
     These tests are about which entry an announcement is matched to and what is
     written back, not about whether an address answers -- that has its own
@@ -514,12 +514,19 @@ def _probe(answers: bool) -> Any:
     `pytest-socket` allows only loopback, so an entry stored at `10.0.0.4` or
     `studio.local` cannot be probed for real, and what the block raises is not
     the `CannotConnect` a dead address gives.
+
+    Answering per address rather than "yes to everything" is what makes the
+    stub worth having: `_async_follow_station` asks about the stored host and
+    the announced list separately, and a stub that said yes to both would let a
+    version that asked the wrong one pass.
     """
     return patch.object(
         AlertRosterConfigFlow,
         "_async_reachable_address",
         autospec=True,
-        side_effect=lambda _self, addresses, _port: addresses[0] if answers else None,
+        side_effect=lambda _self, addresses, _port: next(
+            (address for address in addresses if address in reachable), None
+        ),
     )
 
 
@@ -627,7 +634,7 @@ async def test_a_station_added_by_hand_is_matched_by_address_and_gains_its_name(
     )
     entry.add_to_hass(hass)
 
-    with _probe(answers=True):
+    with _probe("10.0.0.4"):
         result = await _discover(
             hass, _announcement(station.host, station.port, extra_addresses=["10.0.0.4"])
         )
@@ -780,7 +787,7 @@ async def test_a_station_paired_by_hostname_is_not_offered_twice(
     )
     entry.add_to_hass(hass)
 
-    with _probe(answers=True):
+    with _probe("studio.local"):
         result = await _discover(hass, _announcement(station.host, station.port))
     await hass.async_block_till_done()
 
@@ -789,25 +796,62 @@ async def test_a_station_paired_by_hostname_is_not_offered_twice(
     assert len(hass.config_entries.async_entries(DOMAIN)) == 1
 
 
-async def test_an_unrelated_station_announcing_loopback_is_not_mistaken_for_this_one(
+async def test_a_loopback_entry_is_only_matched_as_a_last_resort(
     hass: HomeAssistant, station: FakeStation
 ) -> None:
-    """`127.0.0.1` says nothing about *which* station announced it."""
-    entry = MockConfigEntry(
+    """`127.0.0.1` says nothing about *which* station announced it.
+
+    So an entry stored against it loses to one with better evidence. Neither
+    entry here has a name, so the name pass cannot decide it and the ordering
+    of the address passes is the only thing that can: without it the loopback
+    entry would swallow an announcement belonging to the other station, and be
+    given that station's name and address.
+    """
+    loopback_entry = MockConfigEntry(
         domain=DOMAIN,
         unique_id="src_some_other_station",
-        data={CONF_HOST: "127.0.0.1", CONF_PORT: station.port, CONF_STATION_NAME: None},
+        data={CONF_HOST: station.host, CONF_PORT: station.port, CONF_STATION_NAME: None},
+    )
+    loopback_entry.add_to_hass(hass)
+    routable_entry = MockConfigEntry(
+        domain=DOMAIN,
+        unique_id=station.source_id,
+        data={CONF_HOST: "10.0.0.4", CONF_PORT: station.port, CONF_STATION_NAME: None},
+    )
+    routable_entry.add_to_hass(hass)
+
+    with _probe("10.0.0.4"):
+        result = await _discover(
+            hass, _announcement(station.host, station.port, extra_addresses=["10.0.0.4"])
+        )
+    await hass.async_block_till_done()
+
+    assert result["reason"] == "already_configured"
+    # The routable entry took it; the loopback one was not touched.
+    assert routable_entry.data[CONF_STATION_NAME] == "studio"
+    assert loopback_entry.data[CONF_STATION_NAME] is None
+
+
+async def test_a_station_on_this_very_host_is_still_recognised(
+    hass: HomeAssistant, station: FakeStation
+) -> None:
+    """Loopback is last, not excluded: `_announced_addresses` keeps it for the
+    install where Home Assistant and the station really are the same machine,
+    and refusing to match it here would offer that station a second card."""
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        unique_id=station.source_id,
+        data={CONF_HOST: station.host, CONF_PORT: station.port, CONF_STATION_NAME: None},
     )
     entry.add_to_hass(hass)
 
-    result = await _discover(
-        hass, _announcement(station.host, station.port, name="a different station")
-    )
+    with _probe(station.host):
+        result = await _discover(hass, _announcement(station.host, station.port))
+    await hass.async_block_till_done()
 
-    # Offered as its own station rather than swallowed into the entry above.
-    assert result["type"] is FlowResultType.FORM
-    assert result["step_id"] == "pair"
-    assert entry.data[CONF_STATION_NAME] is None
+    assert result["type"] is FlowResultType.ABORT
+    assert result["reason"] == "already_configured"
+    assert entry.data[CONF_STATION_NAME] == "studio"
 
 
 async def test_a_paired_station_that_still_answers_keeps_the_address_it_has(
@@ -828,13 +872,48 @@ async def test_a_paired_station_that_still_answers_keeps_the_address_it_has(
     )
     entry.add_to_hass(hass)
 
-    with _probe(answers=True):
+    # Both the stored host and an announced address answer, which is the
+    # situation that used to make the entry flip between them.
+    with (
+        _probe("studio.local", station.host),
+        patch.object(hass.config_entries, "async_schedule_reload") as reload,
+    ):
         result = await _discover(hass, _announcement(station.host, station.port))
     await hass.async_block_till_done()
 
     assert result["reason"] == "already_configured"
     # Left exactly as the user typed it, not rewritten to today's IP address.
     assert entry.data[CONF_HOST] == "studio.local"
+    # Nothing changed, so nothing is torn down.
+    reload.assert_not_called()
+
+
+async def test_a_paired_station_that_moved_is_repointed_at_where_it_answers(
+    hass: HomeAssistant, station: FakeStation
+) -> None:
+    """The other half of the rule: an entry pointing nowhere is worth changing.
+
+    The stored host has stopped answering and an announced one has not, which
+    is what a station that actually moved looks like -- as opposed to the same
+    station announcing its addresses in a different order.
+    """
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        unique_id=station.source_id,
+        data={
+            CONF_HOST: "10.0.0.9",
+            CONF_PORT: station.port,
+            CONF_STATION_NAME: "studio",
+        },
+    )
+    entry.add_to_hass(hass)
+
+    with _probe(station.host):
+        result = await _discover(hass, _announcement(station.host, station.port))
+    await hass.async_block_till_done()
+
+    assert result["reason"] == "already_configured"
+    assert entry.data[CONF_HOST] == station.host
 
 
 async def test_a_paired_station_that_announces_but_does_not_answer_keeps_its_address(
@@ -852,7 +931,7 @@ async def test_a_paired_station_that_announces_but_does_not_answer_keeps_its_add
     )
     entry.add_to_hass(hass)
 
-    with _probe(answers=False):
+    with _probe():
         result = await _discover(hass, _announcement(station.host, unused_tcp_port))
     await hass.async_block_till_done()
 
