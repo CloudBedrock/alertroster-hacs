@@ -90,6 +90,13 @@ class FakeStation:
         # is doing the work, rather than the snapshot quietly covering for it.
         self.send_join_snapshot = True
 
+        # What the join snapshot carries, when it must differ from what
+        # `GET /v1/alerts` returns. `None` means "the open alerts", which is
+        # what the real station sends; a test sets this to tell the two apart,
+        # because otherwise the seed and the snapshot deliver the same thing
+        # and an assertion cannot say which one did the work.
+        self.snapshot_alerts: list[dict[str, Any]] | None = None
+
         # Refuse the events upgrade with this status instead of accepting it,
         # so a test can hold the socket down while HTTP keeps working -- a
         # station whose LAN listener is up but whose socket is not.
@@ -208,10 +215,11 @@ class FakeStation:
             return self._unauthorized()
         if self.send_garbage:
             return web.Response(body=b"<html>not json</html>", content_type="text/html", status=500)
-        open_alerts = [
-            a for a in self.alerts.values() if a["status"] in ("triggered", "acknowledged")
-        ]
-        return web.json_response({"alerts": list(reversed(open_alerts))})
+        return web.json_response({"alerts": list(reversed(self._open_alerts()))})
+
+    def _open_alerts(self) -> list[dict[str, Any]]:
+        """The alerts §4.3 calls open -- what both the list and the snapshot carry."""
+        return [a for a in self.alerts.values() if a["status"] in ("triggered", "acknowledged")]
 
     async def _get_alert(self, request: web.Request) -> web.Response:
         """§4.3. One alert of any status."""
@@ -274,7 +282,13 @@ class FakeStation:
         await socket.prepare(request)
         self.sockets.append(socket)
         if self.send_join_snapshot:
-            await socket.send_json({"event": "snapshot", "alerts": list(self.alerts.values())})
+            # Open alerts only, like `GET /v1/alerts` and like the real
+            # station -- verified on one, 2026-08-29. Sending everything here
+            # would have made the fake the only place a closed alert could
+            # arrive in a snapshot, and a test written against that would be
+            # testing the fake.
+            alerts = self._open_alerts() if self.snapshot_alerts is None else self.snapshot_alerts
+            await socket.send_json({"event": "snapshot", "alerts": alerts})
         try:
             async for _message in socket:
                 pass

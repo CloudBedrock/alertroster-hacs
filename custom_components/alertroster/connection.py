@@ -38,6 +38,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import copy
 import logging
 import random
 from typing import TYPE_CHECKING, Any
@@ -64,6 +65,18 @@ _BACKOFF_MAX_FAILURES = 6  # 2**6 = 64, already past the cap
 # up to retry in the same instant, over and over, for as long as it is down.
 _BACKOFF_JITTER_MIN = 0.5
 _BACKOFF_JITTER_MAX = 1.0
+
+# How long a socket has to stay up before it counts as a good connection and
+# the backoff starts again from 1 s. Without this, resetting on the handshake
+# alone lets a station that accepts the upgrade and immediately closes it pin
+# the retry at ~1 s -- plus a full re-seed each time -- for as long as it keeps
+# doing that, which is exactly the case the backoff exists for.
+_STABLE_AFTER = BACKOFF_MAX
+
+# How long `async_stop` will wait for the socket to close before giving up on
+# it. Longer than `api.py`'s `ws_close` would let one unresponsive station hold
+# up Home Assistant's shutdown; this is deliberately shorter.
+_STOP_TIMEOUT = 5.0
 
 # Which transitions leave an alert open. `acknowledged` does: somebody answered,
 # but the condition has not cleared, and `GET /v1/alerts` keeps returning it.
@@ -94,6 +107,9 @@ class StationConnection:
         self._task: asyncio.Task[None] | None = None
         self._connected = False
         self._failures = 0
+        # When the current socket came up, so the backoff can tell a connection
+        # that held from one that was accepted and dropped on the spot.
+        self._connected_at: float | None = None
         # Keyed by alert id so a transition can replace or remove one without
         # scanning. Order is the station's within a seed and not meaningful
         # after transitions have been applied on top; nothing depends on it.
@@ -121,11 +137,13 @@ class StationConnection:
     def open_alerts(self) -> list[dict[str, Any]]:
         """The alerts this source has open on the station, as of the last frame.
 
-        A copy: a caller that mutated this would be editing the state the next
-        listener reads. §6.2 scopes the token to this source, so this is what
-        Home Assistant raised, never everything the station is paging about.
+        A deep copy, not a shallow one: an alert carries nested objects -- the
+        `cloud` field §2 passes through untouched, for one -- and a caller that
+        reached into those would be editing the state the next listener reads.
+        §6.2 scopes the token to this source, so this is what Home Assistant
+        raised, never everything the station is paging about.
         """
-        return [dict(alert) for alert in self._alerts.values()]
+        return [copy.deepcopy(alert) for alert in self._alerts.values()]
 
     @callback
     def async_add_listener(self, update: CALLBACK_TYPE) -> CALLBACK_TYPE:
@@ -167,7 +185,19 @@ class StationConnection:
         if task is not None:
             task.cancel()
             try:
-                await task
+                # Bounded, because the close handshake runs under `ws_close`
+                # (api.py) and a station that holds the TCP connection open
+                # while never answering the close frame would otherwise block
+                # unload, reload and Home Assistant's own shutdown for the
+                # whole of that timeout. The task is the entry's, so if this
+                # gives up on it Home Assistant cancels it again on teardown.
+                async with asyncio.timeout(_STOP_TIMEOUT):
+                    await task
+            except TimeoutError:
+                _LOGGER.debug(
+                    "The AlertRoster station %s did not close its events socket in time",
+                    self._entry.title,
+                )
             except asyncio.CancelledError:
                 pass
             except Exception:
@@ -182,55 +212,78 @@ class StationConnection:
         self._async_set_connected(False)
 
     async def _async_run(self) -> None:
-        """Seed, hold the socket, and reconnect until cancelled or revoked."""
-        while True:
-            try:
-                # Before the socket rather than after: a listener that wakes on
-                # `connected` should find the alerts already there.
-                await self._async_seed()
-                async with contextlib.aclosing(
-                    self._client.events(self._async_on_connect)
-                ) as events:
-                    async for event in events:
-                        self._async_apply(event)
-            except InvalidAuth:
-                self._async_set_connected(False)
-                # No token, no station name, no URL -- just which entry. §3.6
-                # turns this into a reauth flow, and it must never become a
-                # reconnect loop: retrying a revoked token is how you get an
-                # integration that hammers a station for days.
-                _LOGGER.warning(
-                    "The AlertRoster station %s no longer recognises this Home Assistant; "
-                    "asking for it to be paired again",
-                    self._entry.title,
-                )
-                self._entry.async_start_reauth(self._hass)
-                return
-            except CannotConnect as err:
-                # The ordinary case: the station is off, restarting, or the
-                # link dropped. Debug, not warning -- a station that is switched
-                # off overnight is not a fault to fill somebody's log with.
-                _LOGGER.debug("Lost the AlertRoster station %s: %s", self._entry.title, err)
-            except AlertRosterError as err:
-                # The station answered, and with something unusable: a `500` on
-                # the seed, or a reply that is not the shape §4.3 describes.
-                # Worth a warning, still worth retrying.
-                _LOGGER.warning(
-                    "The AlertRoster station %s failed the events connection: %s",
-                    self._entry.title,
-                    err,
-                )
-            else:
-                # The iterator ended without raising. §4.6 has no "goodbye", and
-                # `api.py` documents that an abruptly reset connection ends the
-                # iterator exactly as a clean close does -- so this is not proof
-                # the station meant to stop, and it reconnects like any failure.
-                _LOGGER.debug(
-                    "The AlertRoster station %s closed the events socket", self._entry.title
-                )
+        """Seed, hold the socket, and reconnect until cancelled or revoked.
 
+        Nothing short of cancellation or a revoked token ends this. A bug in
+        here used to end the task with `connected` still true, which is the one
+        state that must never happen: entities would have gone on reporting a
+        station nobody was listening to (CLAUDE.md -- never show stale state).
+        """
+        try:
+            while True:
+                try:
+                    # Before the socket rather than after: a listener that wakes on
+                    # `connected` should find the alerts already there.
+                    await self._async_seed()
+                    async with contextlib.aclosing(
+                        self._client.events(self._async_on_connect)
+                    ) as events:
+                        async for event in events:
+                            self._async_apply(event)
+                except InvalidAuth:
+                    self._async_set_connected(False)
+                    # No token, no station name, no URL -- just which entry. §3.6
+                    # turns this into a reauth flow, and it must never become a
+                    # reconnect loop: retrying a revoked token is how you get an
+                    # integration that hammers a station for days.
+                    _LOGGER.warning(
+                        "The AlertRoster station %s no longer recognises this Home Assistant; "
+                        "asking for it to be paired again",
+                        self._entry.title,
+                    )
+                    self._entry.async_start_reauth(self._hass)
+                    return
+                except CannotConnect as err:
+                    # The ordinary case: the station is off, restarting, or the
+                    # link dropped. Debug, not warning -- a station that is switched
+                    # off overnight is not a fault to fill somebody's log with.
+                    _LOGGER.debug("Lost the AlertRoster station %s: %s", self._entry.title, err)
+                except AlertRosterError as err:
+                    # The station answered, and with something unusable: a `500` on
+                    # the seed, or a reply that is not the shape §4.3 describes.
+                    # Worth a warning, still worth retrying.
+                    _LOGGER.warning(
+                        "The AlertRoster station %s failed the events connection: %s",
+                        self._entry.title,
+                        err,
+                    )
+                except Exception:
+                    # Not a failure the station caused -- every one of those is
+                    # handled above -- so this is a bug in this file. It still must
+                    # not end the task: a station that pages people is worth
+                    # retrying even when we are the broken end of it, and a dead
+                    # task would leave the entry looking healthy until a reload.
+                    _LOGGER.exception(
+                        "The AlertRoster events connection to %s failed unexpectedly",
+                        self._entry.title,
+                    )
+                else:
+                    # The iterator ended without raising. §4.6 has no "goodbye", and
+                    # `api.py` documents that an abruptly reset connection ends the
+                    # iterator exactly as a clean close does -- so this is not proof
+                    # the station meant to stop, and it reconnects like any failure.
+                    _LOGGER.debug(
+                        "The AlertRoster station %s closed the events socket", self._entry.title
+                    )
+
+                self._async_set_connected(False)
+                await asyncio.sleep(self._next_backoff())
+        finally:
+            # However this ends -- cancelled on unload, or returning
+            # because the token was revoked -- nothing is listening to the
+            # station any more, and saying so is the difference between an
+            # entity going unavailable and one showing yesterday's board.
             self._async_set_connected(False)
-            await asyncio.sleep(self._next_backoff())
 
     async def _async_seed(self) -> None:
         """Replace the open-alert set from `GET /v1/alerts` (§4.3)."""
@@ -255,8 +308,14 @@ class StationConnection:
 
     @callback
     def _async_on_connect(self) -> None:
-        """The socket is open: clear the backoff and tell everyone at once."""
-        self._failures = 0
+        """The socket is open: note when, and tell everyone at once.
+
+        The backoff is deliberately *not* cleared here. A station that accepts
+        the upgrade and closes it immediately would otherwise reset it on every
+        cycle and never back off at all; `_next_backoff` clears it only once
+        the socket has held for `_STABLE_AFTER`.
+        """
+        self._connected_at = asyncio.get_running_loop().time()
         self._async_set_connected(True)
 
     @callback
@@ -297,14 +356,42 @@ class StationConnection:
         self._connected = connected
         self._async_notify()
 
+    def _held_for(self) -> float | None:
+        """How long the socket that just ended stayed up, if it came up at all."""
+        if self._connected_at is None:
+            return None
+        return asyncio.get_running_loop().time() - self._connected_at
+
     @callback
     def _async_notify(self) -> None:
-        """Tell every listener to re-read this connection."""
+        """Tell every listener to re-read this connection.
+
+        Each one is guarded: listeners are entities belonging to other
+        platforms, and one of them raising must not cost the rest their update
+        -- `_listeners` is a set, so which ones got skipped would not even be
+        the same twice -- nor take the events connection down with it.
+        """
         for listener in list(self._listeners):
-            listener()
+            try:
+                listener()
+            except Exception:
+                _LOGGER.exception(
+                    "An AlertRoster listener for %s raised while being notified",
+                    self._entry.title,
+                )
 
     def _next_backoff(self) -> float:
-        """How long to wait before the next attempt, and count this failure."""
+        """How long to wait before the next attempt, and count this failure.
+
+        A socket that stayed up for `_STABLE_AFTER` is treated as a connection
+        that worked, so the next outage starts again from 1 s rather than from
+        wherever the last run of failures had climbed to.
+        """
+        held_for = self._held_for()
+        self._connected_at = None
+        if held_for is not None and held_for >= _STABLE_AFTER:
+            self._failures = 0
+
         delay = min(BACKOFF_MAX, BACKOFF_START * float(2**self._failures))
         self._failures = min(self._failures + 1, _BACKOFF_MAX_FAILURES)
         return delay * random.uniform(_BACKOFF_JITTER_MIN, _BACKOFF_JITTER_MAX)
