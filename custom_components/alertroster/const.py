@@ -77,3 +77,22 @@ BUS_EVENTS: Mapping[str, str] = MappingProxyType(
 ATTR_ALERT = "alert"
 ATTR_STATION = "station"
 ATTR_ENTRY_ID = "entry_id"
+
+# The same transitions as the `event` entity spells them (§3.5). Derived from
+# `BUS_EVENTS` rather than written out a second time: an entity's event types
+# are namespaced by the entity, so they are the bus names without the domain in
+# front, and two hand-maintained copies of one mapping drift the first time a
+# station event is added to only one of them.
+ENTITY_EVENT_TYPES: Mapping[str, str] = MappingProxyType(
+    {station: bus.removeprefix(f"{DOMAIN}_") for station, bus in BUS_EVENTS.items()}
+)
+
+# What the device registry says a station is. The device is *named* for the
+# station rather than "AlertRoster station <name>": `has_entity_name` builds
+# every entity id from the device name, and §3.5 asks for `event.<station>_alert`
+# -- which a device called "AlertRoster station studio" would spell
+# `event.alertroster_station_studio_alert`. The brand is already on the device
+# page as its manufacturer, so the longer name only pays for itself in entity
+# ids nobody wants to type.
+DEVICE_MANUFACTURER = "AlertRoster"
+DEVICE_MODEL = "Receiver station"

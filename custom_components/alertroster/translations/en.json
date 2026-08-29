@@ -40,6 +40,23 @@
       "already_in_progress": "This station is already being set up."
     }
   },
+  "entity": {
+    "event": {
+      "alert": {
+        "name": "Alert",
+        "state_attributes": {
+          "event_type": {
+            "state": {
+              "triggered": "Triggered",
+              "acknowledged": "Acknowledged",
+              "resolved": "Resolved",
+              "unacknowledged": "Nobody answered"
+            }
+          }
+        }
+      }
+    }
+  },
   "services": {
     "raise": {
       "name": "Raise an alert",

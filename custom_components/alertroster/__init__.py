@@ -1,11 +1,11 @@
 """AlertRoster: raise alerts on a local receiver station, and react when nobody answers.
 
 Entry setup builds the one client the entry owns, hands it to the services,
-puts the station's transitions on the Home Assistant bus, and starts the
-connection that holds the station's events socket open. The entities that will
-listen to that connection are the M4 issues, which is why `PLATFORMS` is still
-empty -- the bus events do not wait for them, and an automation can trigger on
-`alertroster_unacknowledged` today.
+puts the station's transitions on the Home Assistant bus, sets up the platforms
+that render them, and starts the connection that holds the station's events
+socket open. The transitions reach the bus whether or not any entity is
+listening: an automation can trigger on `alertroster_unacknowledged` without
+the station having a single entity set up.
 
 Setup does not wait for the station to answer -- `connection.py` explains why
 that is a decision rather than an oversight.
@@ -16,7 +16,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.const import CONF_HOST, CONF_PORT, CONF_TOKEN
+from homeassistant.const import CONF_HOST, CONF_PORT, CONF_TOKEN, Platform
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers import config_validation as cv
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
@@ -28,7 +28,7 @@ from .const import DOMAIN
 from .events import async_setup_station_events
 from .services import async_setup_services
 
-PLATFORMS: list[str] = []
+PLATFORMS: list[Platform] = [Platform.EVENT]
 
 # There is no YAML for this integration -- a station is paired through the
 # config flow, because pairing needs a code off the station's screen. Saying so
