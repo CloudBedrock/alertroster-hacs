@@ -28,7 +28,7 @@ from .const import DOMAIN
 from .events import async_setup_station_events
 from .services import async_setup_services
 
-PLATFORMS: list[Platform] = [Platform.EVENT]
+PLATFORMS: list[Platform] = [Platform.BINARY_SENSOR, Platform.EVENT, Platform.SENSOR]
 
 # There is no YAML for this integration -- a station is paired through the
 # config flow, because pairing needs a code off the station's screen. Saying so
