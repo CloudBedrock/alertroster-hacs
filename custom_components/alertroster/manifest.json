@@ -1,0 +1,15 @@
+{
+  "domain": "alertroster",
+  "name": "AlertRoster",
+  "codeowners": ["@jghankins"],
+  "config_flow": true,
+  "dependencies": [],
+  "documentation": "https://github.com/CloudBedrock/alertroster-hacs",
+  "integration_type": "hub",
+  "iot_class": "local_push",
+  "issue_tracker": "https://github.com/CloudBedrock/alertroster-hacs/issues",
+  "loggers": ["custom_components.alertroster"],
+  "requirements": [],
+  "version": "0.1.0",
+  "zeroconf": ["_alertroster-receiver._tcp.local."]
+}
