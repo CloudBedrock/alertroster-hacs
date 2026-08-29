@@ -1,30 +1,35 @@
-"""Config flow tests (AHA-10), against the fake station over a real socket.
+"""Config flow tests (AHA-10, AHA-6), against the fake station over a real socket.
 
-Two boxes on AHA-10 are not ticked here because the code they describe does not
-exist yet, and a test that passes without exercising anything is worse than a
-missing one: zeroconf discovery is AHA-6 and the reauth-on-401 flow is AHA-9.
-Both get their tests with the step they test.
+One box on AHA-10 is still not ticked here because the code it describes does
+not exist yet, and a test that passes without exercising anything is worse than
+a missing one: the reauth-on-401 flow is AHA-9 and gets its tests with the step
+it tests. Zeroconf discovery arrived with AHA-6 and is covered below.
 """
 
 from __future__ import annotations
 
 import logging
+from collections.abc import Iterator
+from ipaddress import ip_address
 from typing import Any
 
 import pytest
+import pytest_socket
 from homeassistant import config_entries
 from homeassistant.config_entries import ConfigFlowResult
 from homeassistant.const import CONF_HOST, CONF_PORT, CONF_TOKEN
 from homeassistant.core import HomeAssistant
 from homeassistant.data_entry_flow import FlowResultType
+from homeassistant.helpers.service_info.zeroconf import ZeroconfServiceInfo
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
-from custom_components.alertroster.config_flow import _is_usable_host
+from custom_components.alertroster.config_flow import _announced_addresses, _is_usable_host
 from custom_components.alertroster.const import (
     CONF_SOURCE_ID,
     CONF_STATION_NAME,
     DEFAULT_PORT,
     DOMAIN,
+    ZEROCONF_TYPE,
 )
 
 from .conftest import FakeStation
@@ -40,6 +45,43 @@ async def _start(hass: HomeAssistant) -> ConfigFlowResult:
 async def _submit(hass: HomeAssistant, flow_id: str, **fields: Any) -> ConfigFlowResult:
     """Fill in the form on screen."""
     return await hass.config_entries.flow.async_configure(flow_id, fields)
+
+
+def _announcement(
+    host: str,
+    port: int,
+    name: str | None = "studio",
+    version: str | None = "1",
+    extra_addresses: list[str] | None = None,
+) -> ZeroconfServiceInfo:
+    """What the station puts on the wire, shaped the way §4.1 describes it.
+
+    Read off a real `avahi-browse` of the `studio` and `om` stations: TXT is
+    exactly `v=1` and `name=<display name>`, and the announcement carries one
+    record per interface.
+    """
+    properties: dict[str, Any] = {}
+    if version is not None:
+        properties["v"] = version
+    if name is not None:
+        properties["name"] = name
+    addresses = [ip_address(host), *(ip_address(a) for a in extra_addresses or [])]
+    return ZeroconfServiceInfo(
+        ip_address=addresses[0],
+        ip_addresses=addresses,
+        port=port,
+        hostname=f"{name or 'station'}.local.",
+        type=ZEROCONF_TYPE,
+        name=f"{name or 'station'}.{ZEROCONF_TYPE}",
+        properties=properties,
+    )
+
+
+async def _discover(hass: HomeAssistant, info: ZeroconfServiceInfo) -> ConfigFlowResult:
+    """Hand the announcement to Home Assistant the way zeroconf does."""
+    return await hass.config_entries.flow.async_init(
+        DOMAIN, context={"source": config_entries.SOURCE_ZEROCONF}, data=info
+    )
 
 
 # -- the happy path -------------------------------------------------------
@@ -453,3 +495,216 @@ async def test_the_replacement_token_reaches_no_log_record(
     token = entry.data[CONF_TOKEN]
     assert token.startswith("lat_")
     assert token not in caplog.text
+
+
+# -- discovery (AHA-6) ----------------------------------------------------
+
+
+async def test_a_discovered_station_pairs_and_is_named_by_its_txt_record(
+    hass: HomeAssistant, station: FakeStation
+) -> None:
+    """§3.1: the TXT `name` titles the flow, and pairing still keys on `source_id`."""
+    result = await _discover(hass, _announcement(station.host, station.port))
+
+    assert result["type"] is FlowResultType.FORM
+    assert result["step_id"] == "pair"
+    # The card and the step are both titled from the announcement, not from the
+    # address, which is the whole point of reading the TXT record.
+    assert result["description_placeholders"] == {"name": "studio"}
+
+    result = await _submit(hass, result["flow_id"], code=station.valid_code)
+
+    assert result["type"] is FlowResultType.CREATE_ENTRY
+    assert result["title"] == "studio"
+    assert result["data"][CONF_HOST] == station.host
+    assert result["data"][CONF_PORT] == station.port
+    assert result["data"][CONF_STATION_NAME] == "studio"
+    # §3.1: the entry's identity is the pairing, not the announcement.
+    assert result["data"][CONF_SOURCE_ID] == station.source_id
+    assert hass.config_entries.async_entries(DOMAIN)[0].unique_id == station.source_id
+
+
+async def test_a_repeat_announcement_does_not_open_a_second_card(
+    hass: HomeAssistant, station: FakeStation
+) -> None:
+    """§3.1: one station on screen once, however often it announces.
+
+    The second announcement deliberately carries a *different* address, which
+    is what a station re-announcing on another interface looks like and what a
+    host-and-port key would have failed to recognise.
+    """
+    first = await _discover(hass, _announcement(station.host, station.port))
+    assert first["step_id"] == "pair"
+
+    again = await _discover(
+        hass, _announcement("10.51.1.215", station.port, extra_addresses=[station.host])
+    )
+
+    assert again["type"] is FlowResultType.ABORT
+    assert again["reason"] == "already_in_progress"
+    assert len(hass.config_entries.flow.async_progress_by_handler(DOMAIN)) == 1
+
+
+async def test_rediscovering_a_paired_station_is_ignored(
+    hass: HomeAssistant, station: FakeStation
+) -> None:
+    """§3.1: a station already paired does not come back as something to add."""
+    MockConfigEntry(
+        domain=DOMAIN,
+        unique_id=station.source_id,
+        data={
+            CONF_HOST: station.host,
+            CONF_PORT: station.port,
+            CONF_STATION_NAME: "studio",
+        },
+    ).add_to_hass(hass)
+
+    result = await _discover(hass, _announcement(station.host, station.port))
+
+    assert result["type"] is FlowResultType.ABORT
+    assert result["reason"] == "already_configured"
+
+
+async def test_a_paired_station_that_moved_has_its_address_updated(
+    hass: HomeAssistant, station: FakeStation
+) -> None:
+    """§3.1: the entry follows the station, rather than pointing where it was."""
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        unique_id=station.source_id,
+        data={
+            CONF_HOST: "10.0.0.9",
+            CONF_PORT: DEFAULT_PORT,
+            CONF_STATION_NAME: "studio",
+        },
+    )
+    entry.add_to_hass(hass)
+
+    result = await _discover(hass, _announcement(station.host, station.port))
+    await hass.async_block_till_done()
+
+    assert result["type"] is FlowResultType.ABORT
+    assert result["reason"] == "already_configured"
+    # Matched by name -- neither the host nor the port it was stored with is
+    # the one that just announced.
+    assert entry.data[CONF_HOST] == station.host
+    assert entry.data[CONF_PORT] == station.port
+
+
+async def test_a_station_added_by_hand_is_matched_by_address_and_gains_its_name(
+    hass: HomeAssistant, station: FakeStation
+) -> None:
+    """An entry from the manual step has no name stored, so the first
+    announcement has only the address to recognise it by -- and backfills the
+    name, so the next move can be matched the better way."""
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        unique_id=station.source_id,
+        data={
+            CONF_HOST: station.host,
+            CONF_PORT: station.port,
+            CONF_STATION_NAME: None,
+        },
+    )
+    entry.add_to_hass(hass)
+
+    result = await _discover(hass, _announcement(station.host, station.port))
+    await hass.async_block_till_done()
+
+    assert result["type"] is FlowResultType.ABORT
+    assert result["reason"] == "already_configured"
+    assert entry.data[CONF_STATION_NAME] == "studio"
+
+
+@pytest.mark.parametrize(
+    ("version", "name"),
+    [
+        ("2", "studio"),
+        (None, "studio"),
+        ("1", None),
+        ("1", "   "),
+    ],
+    ids=["a newer announcement", "no version", "no name", "a blank name"],
+)
+async def test_an_announcement_this_version_cannot_read_is_refused(
+    hass: HomeAssistant, station: FakeStation, version: str | None, name: str | None
+) -> None:
+    """§4.1 promises `v=1` and a name. Anything else is left to the manual step."""
+    result = await _discover(
+        hass, _announcement(station.host, station.port, name=name, version=version)
+    )
+
+    assert result["type"] is FlowResultType.ABORT
+    assert result["reason"] == "unsupported_version"
+
+
+async def test_a_station_that_announces_but_does_not_answer_is_refused(
+    hass: HomeAssistant, station: FakeStation, unused_tcp_port: int
+) -> None:
+    """Announcing is not answering: the port is real, nothing is behind it."""
+    result = await _discover(hass, _announcement(station.host, unused_tcp_port))
+
+    assert result["type"] is FlowResultType.ABORT
+    assert result["reason"] == "cannot_connect"
+
+
+@pytest.fixture
+def dead_address() -> Iterator[str]:
+    """A loopback address with nothing bound to it, for the walk-past test.
+
+    `pytest-socket` allows only `127.0.0.1`, and what it raises for anything
+    else is a `SocketConnectBlockedError` rather than the refusal a real dead
+    address produces -- which would escape `CannotConnect` and prove nothing.
+    Widening the allowance by one more loopback address keeps the no-network
+    rule intact: `127.0.0.2` is still this machine.
+    """
+    pytest_socket.socket_allow_hosts(["127.0.0.1", "127.0.0.2"])
+    try:
+        yield "127.0.0.2"
+    finally:
+        pytest_socket.socket_allow_hosts(["127.0.0.1"])
+
+
+async def test_the_first_announced_address_that_answers_is_the_one_used(
+    hass: HomeAssistant, station: FakeStation, dead_address: str
+) -> None:
+    """A station announces on every interface; most of them are not reachable.
+
+    The dead address stands in for the docker and libvirt bridge addresses a
+    real station announces -- reachable from the station, not from here.
+    """
+    result = await _discover(
+        hass,
+        _announcement(dead_address, station.port, extra_addresses=[station.host]),
+    )
+    assert result["step_id"] == "pair"
+
+    result = await _submit(hass, result["flow_id"], code=station.valid_code)
+
+    assert result["type"] is FlowResultType.CREATE_ENTRY
+    assert result["data"][CONF_HOST] == station.host
+
+
+@pytest.mark.parametrize(
+    ("announced", "expected"),
+    [
+        (["10.0.0.4"], ["10.0.0.4"]),
+        # Loopback is kept but demoted: on another machine it is Home
+        # Assistant itself, not the station.
+        (["127.0.0.1", "10.0.0.4"], ["10.0.0.4", "127.0.0.1"]),
+        # `fe80::` needs a scope id the announcement does not carry.
+        (["fe80::1", "10.0.0.4"], ["10.0.0.4"]),
+        (["10.0.0.4", "10.0.0.4"], ["10.0.0.4"]),
+        (["fe80::1"], []),
+    ],
+    ids=["one address", "loopback last", "link-local dropped", "deduplicated", "nothing usable"],
+)
+def test_which_announced_addresses_are_worth_trying(
+    announced: list[str], expected: list[str]
+) -> None:
+    """The ordering `_async_reachable_address` then walks."""
+    info = _announcement("10.0.0.4", DEFAULT_PORT)
+    info.ip_address = ip_address(announced[0])
+    info.ip_addresses = [ip_address(a) for a in announced]
+
+    assert _announced_addresses(info) == expected

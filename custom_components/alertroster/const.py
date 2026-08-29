@@ -7,6 +7,20 @@ DOMAIN = "alertroster"
 DEFAULT_PORT = 4747
 ZEROCONF_TYPE = "_alertroster-receiver._tcp.local."
 
+# The mDNS TXT records a station publishes (§4.1). It advertises *only* while
+# "Accept sources from the LAN" is on, so an announcement is itself the signal
+# that pairing is possible -- which is why the discovery step does not have to
+# ask the user whether the feature is enabled the way the manual step does.
+#
+# An announcement whose `v` is anything but `1` is refused rather than guessed
+# at: §4.1 makes no compatibility promise about the announcement's shape, and
+# the manual host/port step still reaches a station this integration is too old
+# to recognise. Failing closed costs a newer station its discovery card; failing
+# open costs it a pairing flow that breaks somewhere less obvious.
+ZEROCONF_VERSION_KEY = "v"
+ZEROCONF_VERSION = "1"
+ZEROCONF_NAME_KEY = "name"
+
 # Config entry data keys. `host`, `port` and `token` come from
 # `homeassistant.const`; these two have no standard spelling.
 CONF_SOURCE_ID = "source_id"
