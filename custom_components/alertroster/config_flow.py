@@ -278,42 +278,53 @@ class AlertRosterConfigFlow(ConfigFlow, domain=DOMAIN):
     ) -> ConfigEntry | None:
         """The entry already paired with this station, if there is one.
 
+        Three passes, best evidence first, because a missed match is expensive:
+        pairing through the discovery card it produces mints a second
+        `source_id`, and a second `source_id` is a second entry and a second
+        events socket for one station, which no unique id would catch.
+
         By name first, because that is the only thing that survives the station
-        moving. The rest is for entries added through the manual step, which
-        have no name stored until the first announcement backfills one, and so
-        can only be recognised by where they point.
+        moving. Then by where the entry points, which is all an entry added
+        through the manual step has until the first announcement backfills a
+        name -- both the announced addresses and the announced hostname, since
+        the manual step invites either ("10.0.0.4 or studio.local").
 
-        Both the announced addresses and the announced hostname are compared,
-        because the manual step invites either: its error text tells people to
-        enter "10.0.0.4 or studio.local". Missing one of those would not merely
-        show a redundant discovery card -- pairing through it mints a second
-        `source_id`, which is a second entry and a second events socket for one
-        station, and no unique id would catch it.
-
-        Loopback is left out of the comparison even though the probe still
-        tries it: `127.0.0.1` is the one address that says nothing about *which*
-        station is being announced, so an entry stored against it would match
-        the first station on the LAN to announce loopback on the same port.
+        Loopback is the last pass rather than part of the second, because
+        `127.0.0.1` says nothing about *which* station announced it: an entry
+        stored against it matches the first station on the LAN to announce
+        loopback on the same port. Held back to a last resort, that misfire
+        needs the announcement to match nothing else at all, while the
+        same-host install `_announced_addresses` keeps loopback for still gets
+        recognised. It cannot be resolved better from the announcement alone.
         """
-        hostname = discovery_info.hostname.rstrip(".").casefold()
-        where = {
-            address
-            for address in _announced_addresses(discovery_info)
-            if not ip_address(address).is_loopback
-        }
-
         entries = self._async_current_entries(include_ignore=False)
         for entry in entries:
             if entry.data.get(CONF_STATION_NAME) == name:
                 return entry
-        for entry in entries:
-            if entry.data.get(CONF_PORT) != discovery_info.port:
-                continue
-            host = entry.data.get(CONF_HOST)
-            if not isinstance(host, str):
-                continue
-            if host in where or host.rstrip(".").casefold() == hostname:
-                return entry
+
+        hostname = discovery_info.hostname.rstrip(".").casefold()
+        announced = _announced_addresses(discovery_info)
+        routable = {address for address in announced if not ip_address(address).is_loopback}
+        loopback = {address for address in announced if ip_address(address).is_loopback}
+
+        for where in (routable, loopback):
+            for entry in entries:
+                if entry.data.get(CONF_PORT) != discovery_info.port:
+                    continue
+                host = entry.data.get(CONF_HOST)
+                if not isinstance(host, str):
+                    continue
+                # Compared as an address where it is one, so that
+                # `2001:DB8::1` and `2001:db8::1` are the same host rather than
+                # two strings that differ.
+                try:
+                    if str(ip_address(host)) in where:
+                        return entry
+                except ValueError:
+                    # Not an address, so it can only be the announced hostname
+                    # -- and only if there is one to be.
+                    if where is routable and hostname and host.rstrip(".").casefold() == hostname:
+                        return entry
         return None
 
     async def async_step_user(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
