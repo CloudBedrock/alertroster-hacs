@@ -6,6 +6,7 @@ import asyncio
 import contextlib
 import logging
 from collections.abc import AsyncIterator
+from typing import Any
 
 import aiohttp
 import pytest
@@ -364,10 +365,21 @@ async def test_events_leaves_no_heartbeat_timer_when_abandoned(
     loop = asyncio.get_running_loop()
 
     def live_heartbeats() -> int:
-        return sum(
-            1
-            for handle in loop._scheduled  # noqa: SLF001
-            if not handle.cancelled() and "_send_heartbeat" in repr(handle)
+        # `_scheduled` is the loop's timer heap. There is no public way to ask
+        # "what timers are outstanding", and the whole point of this test is a
+        # timer nobody holds a reference to -- so it is read off the loop, and
+        # typed as Any because asyncio does not promise it.
+        scheduled: Any = getattr(loop, "_scheduled", None)
+        # Not a default of `()`: a loop that stopped exposing its timer heap
+        # would make this test count zero timers forever and pass whether or
+        # not the leak came back.
+        assert scheduled is not None, "asyncio no longer exposes _scheduled; rewrite this test"
+        return len(
+            [
+                handle
+                for handle in scheduled
+                if not handle.cancelled() and "_send_heartbeat" in repr(handle)
+            ]
         )
 
     before = live_heartbeats()
