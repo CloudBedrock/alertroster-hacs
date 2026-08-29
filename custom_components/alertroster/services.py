@@ -1,0 +1,225 @@
+"""The `raise` and `resolve` service actions (REQUIREMENTS.md §3.3).
+
+What an automation touches. Both go through `AlertRosterClient` and neither
+builds a request of its own.
+
+There is no `acknowledge` here and there must never be one: protocol §4.4
+refuses it for a source token, because acknowledging is a person answering at a
+surface, not a program deciding the page has been dealt with.
+
+Every failure becomes a `HomeAssistantError` naming the station, because where
+these are read is an automation trace, and "request failed" tells the person
+reading it nothing about which of their stations is unreachable.
+"""
+
+from __future__ import annotations
+
+import contextlib
+from collections.abc import Iterator
+from typing import TYPE_CHECKING, cast
+
+import voluptuous as vol
+from homeassistant.config_entries import ConfigEntryState
+from homeassistant.core import (
+    HomeAssistant,
+    ServiceCall,
+    ServiceResponse,
+    SupportsResponse,
+    callback,
+)
+from homeassistant.exceptions import HomeAssistantError, ServiceValidationError
+from homeassistant.helpers import config_validation as cv
+from homeassistant.helpers import selector
+
+from .api import (
+    AlertRosterError,
+    CannotConnect,
+    InvalidAlertId,
+    InvalidAuth,
+    StationError,
+)
+from .const import DOMAIN
+
+if TYPE_CHECKING:
+    from . import AlertRosterConfigEntry
+
+SERVICE_RAISE = "raise"
+SERVICE_RESOLVE = "resolve"
+
+ATTR_CONFIG_ENTRY = "config_entry"
+ATTR_TITLE = "title"
+ATTR_DETAIL = "detail"
+ATTR_URGENCY = "urgency"
+ATTR_DEDUP_KEY = "dedup_key"
+ATTR_ACK_TIMEOUT = "ack_timeout_seconds"
+ATTR_ALERT_ID = "alert_id"
+
+URGENCIES = ["high", "low"]
+
+_ENTRY_SELECTOR = selector.ConfigEntrySelector({"integration": DOMAIN})
+
+RAISE_SCHEMA = vol.Schema(
+    {
+        vol.Optional(ATTR_CONFIG_ENTRY): _ENTRY_SELECTOR,
+        vol.Required(ATTR_TITLE): cv.string,
+        vol.Optional(ATTR_DETAIL): cv.string,
+        # Defaulted here, unlike `ack_timeout_seconds`: §3.3 fixes the default
+        # urgency at `high`, while expiry is the station's business entirely.
+        vol.Optional(ATTR_URGENCY, default="high"): vol.In(URGENCIES),
+        vol.Optional(ATTR_DEDUP_KEY): cv.string,
+        # Bounded to match services.yaml: the UI selector already refuses
+        # anything outside this, and a YAML automation should not be able to
+        # send a 0 the form makes unreachable.
+        vol.Optional(ATTR_ACK_TIMEOUT): vol.All(cv.positive_int, vol.Range(min=1, max=86400)),
+    }
+)
+
+RESOLVE_SCHEMA = vol.Schema(
+    {
+        vol.Optional(ATTR_CONFIG_ENTRY): _ENTRY_SELECTOR,
+        vol.Optional(ATTR_ALERT_ID): cv.string,
+        vol.Optional(ATTR_DEDUP_KEY): cv.string,
+    }
+)
+
+
+def _target_entry(hass: HomeAssistant, call: ServiceCall) -> AlertRosterConfigEntry:
+    """Find the station this call is aimed at.
+
+    With one station paired the target may be left out, because making every
+    automation name the only station there is would be pointless ceremony. With
+    several it must be given, and the error names them -- guessing which
+    station should page someone is not a choice this integration gets to make.
+    """
+    entries: list[AlertRosterConfigEntry] = hass.config_entries.async_loaded_entries(DOMAIN)
+
+    if (entry_id := call.data.get(ATTR_CONFIG_ENTRY)) is not None:
+        entry = hass.config_entries.async_get_entry(entry_id)
+        if entry is None or entry.domain != DOMAIN:
+            raise ServiceValidationError(f"{entry_id} is not an AlertRoster station")
+        if entry.state is not ConfigEntryState.LOADED:
+            raise ServiceValidationError(f"the AlertRoster station {entry.title} is not loaded")
+        return cast("AlertRosterConfigEntry", entry)
+
+    if not entries:
+        raise ServiceValidationError("no AlertRoster station is set up")
+    if len(entries) > 1:
+        names = ", ".join(sorted(e.title for e in entries))
+        raise ServiceValidationError(
+            f"several AlertRoster stations are paired ({names}); "
+            f"name the one to use in the action's station field"
+        )
+    return entries[0]
+
+
+@contextlib.contextmanager
+def _station_errors(entry: AlertRosterConfigEntry) -> Iterator[None]:
+    """Turn every way a station call can fail into a readable error.
+
+    A context manager rather than a wrapper taking the coroutine: the calls it
+    guards return different shapes -- one alert, or a list of them -- and a
+    wrapper would have had to claim one type for both and lie about the other.
+    """
+    try:
+        yield
+    except InvalidAlertId as err:
+        # Never left the process: the id came from the automation and `api.py`
+        # refused it before building a URL. Calling that a station failure
+        # would point the reader at the wrong machine.
+        raise ServiceValidationError(f"{err}") from err
+    except CannotConnect as err:
+        raise HomeAssistantError(f"could not reach the AlertRoster station {entry.title}") from err
+    except InvalidAuth as err:
+        # AHA-9 turns this into a reauth flow; until that step exists, starting
+        # one would send the user to a step that is not there.
+        raise HomeAssistantError(
+            f"the AlertRoster station {entry.title} no longer recognises "
+            f"this Home Assistant -- pair it again"
+        ) from err
+    except StationError as err:
+        detail = err.extra.get("details") or err.error
+        raise HomeAssistantError(
+            f"the AlertRoster station {entry.title} refused the request: {detail}"
+        ) from err
+    except AlertRosterError as err:
+        raise HomeAssistantError(
+            f"the AlertRoster station {entry.title} failed the request: {err}"
+        ) from err
+
+
+async def _async_raise(call: ServiceCall) -> ServiceResponse:
+    """Raise an alert on the station (§4.2).
+
+    A repeat with a live `dedup_key` is a success that returns the existing
+    alert, so a retrying automation is safe. It is *not* an update -- verified
+    against a station, the second call's fields are ignored -- so changing a
+    live alert means resolving it and raising a new one.
+    """
+    entry = _target_entry(call.hass, call)
+    with _station_errors(entry):
+        alert = await entry.runtime_data.client.create_alert(
+            title=call.data[ATTR_TITLE],
+            detail=call.data.get(ATTR_DETAIL),
+            urgency=call.data.get(ATTR_URGENCY),
+            dedup_key=call.data.get(ATTR_DEDUP_KEY),
+            # Omitted rather than defaulted: the station decides when an alert
+            # has expired, and this integration holds no timers (§2).
+            ack_timeout_seconds=call.data.get(ATTR_ACK_TIMEOUT),
+        )
+    return dict(alert)
+
+
+async def _async_resolve(call: ServiceCall) -> ServiceResponse:
+    """Resolve an alert -- the source saying the condition cleared (§4.4)."""
+    alert_id = call.data.get(ATTR_ALERT_ID)
+    dedup_key = call.data.get(ATTR_DEDUP_KEY)
+    if (alert_id is None) == (dedup_key is None):
+        raise ServiceValidationError("give either alert_id or dedup_key, not both and not neither")
+
+    entry = _target_entry(call.hass, call)
+
+    if alert_id is None:
+        # §6.2 scopes the token to this source, so this searches what Home
+        # Assistant raised, never everything the station is paging about.
+        with _station_errors(entry):
+            open_alerts = await entry.runtime_data.client.list_alerts()
+        matches = [a for a in open_alerts if a.get("dedup_key") == dedup_key]
+        if not matches:
+            # The automation named a key nothing is open under -- bad input, not
+            # a broken station, so no stack trace in the log.
+            raise ServiceValidationError(
+                f"the AlertRoster station {entry.title} has no open alert "
+                f"with dedup_key {dedup_key!r}"
+            )
+        found = matches[0].get("id")
+        if not isinstance(found, str):
+            raise HomeAssistantError(
+                f"the AlertRoster station {entry.title} returned an alert with no id"
+            )
+        alert_id = found
+
+    with _station_errors(entry):
+        alert = await entry.runtime_data.client.resolve_alert(alert_id)
+    return dict(alert)
+
+
+@callback
+def async_setup_services(hass: HomeAssistant) -> None:
+    """Register both actions on the `alertroster` domain."""
+    hass.services.async_register(
+        DOMAIN,
+        SERVICE_RAISE,
+        _async_raise,
+        schema=RAISE_SCHEMA,
+        # OPTIONAL, not ONLY: most automations just page someone and never look
+        # at the reply, but one that means to resolve the alert later needs the
+        # id, and §3.3 says it gets it from here.
+        supports_response=SupportsResponse.OPTIONAL,
+    )
+    hass.services.async_register(
+        DOMAIN,
+        SERVICE_RESOLVE,
+        _async_resolve,
+        schema=RESOLVE_SCHEMA,
+        supports_response=SupportsResponse.OPTIONAL,
+    )
