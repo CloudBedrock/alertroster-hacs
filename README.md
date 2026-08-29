@@ -111,8 +111,9 @@ person reads — renaming the entry renames it in the next event.
 | `binary_sensor.<station>_connected` | the live link to the station is up |
 | `event.<station>_alert` | last transition, for the UI trigger picker |
 
-All of them go **unavailable** when the station cannot be reached. A stale board is worse than a
-blank one.
+All of them go **unavailable** when the station cannot be reached — except
+`binary_sensor.<station>_connected`, which turns **off**: it is the one reporting the outage, so it
+has to still be there during it. A stale board is worse than a blank one.
 
 A source only sees its own alerts, so these describe what Home Assistant raised — not everything
 the station is paging about.

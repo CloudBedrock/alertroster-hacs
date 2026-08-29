@@ -41,6 +41,14 @@
     }
   },
   "entity": {
+    "binary_sensor": {
+      "alerting": {
+        "name": "Alerting"
+      },
+      "connected": {
+        "name": "Connected"
+      }
+    },
     "event": {
       "alert": {
         "name": "Alert",
@@ -54,6 +62,11 @@
             }
           }
         }
+      }
+    },
+    "sensor": {
+      "open_alerts": {
+        "name": "Open alerts"
       }
     }
   },
