@@ -60,11 +60,15 @@ def async_setup_station_events(
             # names the unknown ones it sees, and repeating that per frame
             # would be noise on a station that keeps sending one.
             return
-        if event.alert is None:
+        if not event.alert:
             # A transition without its alert is the station contradicting §4.6.
             # Firing `alertroster_unacknowledged` with no alert attached would
             # trip every automation listening for it and give them nothing to
             # act on, which is worse than the frame being dropped.
+            #
+            # Falsy rather than `is None`, because `"alert": {}` is the same
+            # frame with a different spelling: `_async_apply` discards it too
+            # (no id), so nothing downstream would make up for firing it.
             _LOGGER.debug(
                 "The AlertRoster station %s sent %r with no alert; ignoring it",
                 entry.title,
