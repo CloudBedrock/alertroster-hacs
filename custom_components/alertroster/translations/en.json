@@ -14,7 +14,9 @@
     "error": {
       "cannot_connect": "Could not reach the station. Is 'Accept sources from the LAN' turned on in its Pairing screen?",
       "window_closed": "The station's pairing window is not open. Open Pairing on the station and try again.",
-      "invalid_code": "That code was not accepted."
+      "invalid_code": "That code was not accepted.",
+      "window_exhausted": "That code was not accepted, and three wrong codes have closed the station's pairing window. On the station open Service → Pairing → Pair a new source again for a fresh code.",
+      "unknown": "Unexpected error while pairing with the station. Check the Home Assistant log."
     },
     "abort": {
       "already_configured": "This station is already paired."
