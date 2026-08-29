@@ -25,6 +25,7 @@ from homeassistant.config_entries import ConfigFlow, ConfigFlowResult
 from homeassistant.const import CONF_HOST, CONF_PORT, CONF_TOKEN
 from homeassistant.helpers import config_validation as cv
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
+from yarl import URL
 
 from .api import (
     AlertRosterClient,
@@ -58,6 +59,27 @@ STEP_USER_SCHEMA = vol.Schema(
 STEP_PAIR_SCHEMA = vol.Schema({vol.Required(CONF_CODE): cv.string})
 
 
+def _is_usable_host(host: str, port: int) -> bool:
+    """Whether `host` can address a station at all.
+
+    The Host field collects what people can see, which means it collects
+    `http://10.0.0.4` and `10.0.0.4:4747` as often as a bare host. Neither can
+    build a URL, and without this the `ValueError` from deep inside the request
+    escapes the step as an unknown error and kills the flow.
+
+    Answering it with `URL.build` rather than a regex of our own is what keeps
+    `fe80::1` working: yarl brackets an IPv6 literal itself, where any
+    hand-rolled "a host may not contain a colon" rule would reject it.
+    """
+    if not host:
+        return False
+    try:
+        URL.build(scheme="http", host=host, port=port)
+    except ValueError:
+        return False
+    return True
+
+
 class AlertRosterConfigFlow(ConfigFlow, domain=DOMAIN):
     """Handle a config flow for AlertRoster."""
 
@@ -88,21 +110,28 @@ class AlertRosterConfigFlow(ConfigFlow, domain=DOMAIN):
         if user_input is not None:
             host = user_input[CONF_HOST].strip()
             port = user_input[CONF_PORT]
-            # The real guard against a second entry for one station is the
-            # `source_id` unique id set in `async_step_pair`; this only spares
-            # the user a pairing code they were never going to be able to use.
-            self._async_abort_entries_match({CONF_HOST: host, CONF_PORT: port})
 
-            client = AlertRosterClient(async_get_clientsession(self.hass), host, port)
-            try:
-                station = await client.probe()
-            except CannotConnect:
-                errors["base"] = "cannot_connect"
+            if not _is_usable_host(host, port):
+                # Its own error rather than `cannot_connect`: telling someone
+                # who pasted a URL to go check "Accept sources from the LAN"
+                # sends them after a problem they do not have.
+                errors["base"] = "invalid_host"
             else:
-                self._host = host
-                self._port = port
-                self._station = station
-                return await self.async_step_pair()
+                # The real guard against a second entry for one station is the
+                # `source_id` unique id set in `async_step_pair`; this only
+                # spares the user a pairing code they could never have used.
+                self._async_abort_entries_match({CONF_HOST: host, CONF_PORT: port})
+
+                client = AlertRosterClient(async_get_clientsession(self.hass), host, port)
+                try:
+                    station = await client.probe()
+                except CannotConnect:
+                    errors["base"] = "cannot_connect"
+                else:
+                    self._host = host
+                    self._port = port
+                    self._station = station
+                    return await self.async_step_pair()
 
         return self.async_show_form(
             step_id="user",
