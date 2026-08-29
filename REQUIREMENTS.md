@@ -110,7 +110,12 @@ usable from the UI trigger picker without typing an event name.
 
 ### 3.5 Entities
 
-Per paired station, one device ("AlertRoster station <name>") with:
+Per paired station, one device, named for the station itself (`studio`, not "AlertRoster station
+studio"): `has_entity_name` builds every entity id below from the device name, and the longer name
+would spell them `event.alertroster_station_studio_alert`. The brand is on the device page as its
+manufacturer instead. The device is identified by the config entry, not by `source_id` — §6.2
+remints the source row on every pairing, so a device keyed on it would be abandoned and rebuilt
+(with new entity ids) the first time a revoked token was re-paired.
 
 | Entity | Type | Meaning |
 |---|---|---|
@@ -119,7 +124,10 @@ Per paired station, one device ("AlertRoster station <name>") with:
 | `binary_sensor.<station>_connected` | `binary_sensor` (device class `connectivity`) | the events socket is up |
 | `event.<station>_alert` | `event` | last transition (see 3.4) |
 
-All entities become `unavailable` when the socket is down, never frozen at the last value.
+Every entity except `binary_sensor.<station>_connected` becomes `unavailable` when the socket is
+down, never frozen at the last value — `_connected` is the one that must stay available, because it
+is what reports the outage. Availability comes back only after the post-reconnect `GET /v1/alerts`
+re-seed has landed, not when the socket opens.
 
 Scope note: a source token sees only the alerts *it* raised (§6.2). The entities describe HA's
 alerts on the station, not everything the station is paging about. The README says this.
