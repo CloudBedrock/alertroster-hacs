@@ -1,0 +1,59 @@
+raise:
+  fields:
+    config_entry:
+      required: false
+      selector:
+        config_entry:
+          integration: alertroster
+    title:
+      required: true
+      example: "Garage door open after midnight"
+      selector:
+        text:
+    detail:
+      required: false
+      example: "The side door has been open for 12 minutes."
+      selector:
+        text:
+          multiline: true
+    urgency:
+      required: false
+      default: high
+      selector:
+        select:
+          translation_key: urgency
+          options:
+            - high
+            - low
+    dedup_key:
+      required: false
+      example: garage-door-night
+      selector:
+        text:
+    ack_timeout_seconds:
+      required: false
+      example: 120
+      selector:
+        number:
+          min: 1
+          max: 86400
+          unit_of_measurement: seconds
+          mode: box
+
+resolve:
+  fields:
+    config_entry:
+      required: false
+      selector:
+        config_entry:
+          integration: alertroster
+    alert_id:
+      required: false
+      example: la_01J8ZP5X9K
+      selector:
+        text:
+    dedup_key:
+      required: false
+      example: garage-door-night
+      selector:
+        text:

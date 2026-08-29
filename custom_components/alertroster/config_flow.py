@@ -41,7 +41,7 @@ from .const import (
     DEFAULT_PORT,
     DOMAIN,
     PAIR_KIND,
-    PAIR_NAME,
+    PAIR_NAME_FALLBACK,
     PAIRING_ATTEMPTS,
 )
 
@@ -146,7 +146,10 @@ class AlertRosterConfigFlow(ConfigFlow, domain=DOMAIN):
         if user_input is not None:
             client = AlertRosterClient(async_get_clientsession(self.hass), self._host, self._port)
             try:
-                result = await client.pair(user_input[CONF_CODE].strip(), PAIR_NAME, PAIR_KIND)
+                # AHA-32: the station's Pairing list shows this, so it says
+                # which Home Assistant, not merely that it is one.
+                name = self.hass.config.location_name.strip() or PAIR_NAME_FALLBACK
+                result = await client.pair(user_input[CONF_CODE].strip(), name, PAIR_KIND)
             except CannotConnect:
                 errors["base"] = "cannot_connect"
             except PairingWindowClosed:
