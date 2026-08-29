@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import secrets
 from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from typing import Any
 
 import pytest
@@ -326,6 +327,23 @@ class FakeStation:
         return token
 
 
+@asynccontextmanager
+async def _serving(source_id: str | None = None) -> AsyncIterator[FakeStation]:
+    """Run one `FakeStation` on a loopback port for the body of a fixture."""
+    fake = FakeStation()
+    if source_id is not None:
+        fake.source_id = source_id
+    server = TestServer(fake.app)
+    fake._server = server
+    await server.start_server()
+    fake.host = server.host or "127.0.0.1"
+    fake.port = server.port or 0
+    try:
+        yield fake
+    finally:
+        await server.close()
+
+
 @pytest.fixture
 async def station(socket_enabled: None) -> AsyncIterator[FakeStation]:
     """A fake station listening on a loopback port.
@@ -336,13 +354,16 @@ async def station(socket_enabled: None) -> AsyncIterator[FakeStation]:
     for a server on 127.0.0.1 that this fixture owns -- is the narrowest way to
     let the real client speak to it.
     """
-    fake = FakeStation()
-    server = TestServer(fake.app)
-    fake._server = server
-    await server.start_server()
-    fake.host = server.host or "127.0.0.1"
-    fake.port = server.port or 0
-    try:
+    async with _serving() as fake:
         yield fake
-    finally:
-        await server.close()
+
+
+@pytest.fixture
+async def second_station(socket_enabled: None) -> AsyncIterator[FakeStation]:
+    """A second station, on its own port, for the tests about telling two apart.
+
+    Its `source_id` differs from `station`'s because that is the config entry's
+    unique id, and two entries paired to two stations cannot share one.
+    """
+    async with _serving("src_1cb0d3a2-7be") as fake:
+        yield fake
