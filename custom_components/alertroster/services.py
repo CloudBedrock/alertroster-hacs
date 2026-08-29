@@ -31,11 +31,17 @@ from homeassistant.exceptions import HomeAssistantError, ServiceValidationError
 from homeassistant.helpers import config_validation as cv
 from homeassistant.helpers import selector
 
-from .api import AlertRosterError, CannotConnect, InvalidAuth, StationError
+from .api import (
+    AlertRosterError,
+    CannotConnect,
+    InvalidAlertId,
+    InvalidAuth,
+    StationError,
+)
 from .const import DOMAIN
 
 if TYPE_CHECKING:
-    from . import AlertRosterConfigEntry, AlertRosterData
+    from . import AlertRosterConfigEntry
 
 SERVICE_RAISE = "raise"
 SERVICE_RESOLVE = "resolve"
@@ -61,7 +67,10 @@ RAISE_SCHEMA = vol.Schema(
         # urgency at `high`, while expiry is the station's business entirely.
         vol.Optional(ATTR_URGENCY, default="high"): vol.In(URGENCIES),
         vol.Optional(ATTR_DEDUP_KEY): cv.string,
-        vol.Optional(ATTR_ACK_TIMEOUT): cv.positive_int,
+        # Bounded to match services.yaml: the UI selector already refuses
+        # anything outside this, and a YAML automation should not be able to
+        # send a 0 the form makes unreachable.
+        vol.Optional(ATTR_ACK_TIMEOUT): vol.All(cv.positive_int, vol.Range(min=1, max=86400)),
     }
 )
 
@@ -74,7 +83,7 @@ RESOLVE_SCHEMA = vol.Schema(
 )
 
 
-def _entry_data(hass: HomeAssistant, call: ServiceCall) -> AlertRosterData:
+def _target_entry(hass: HomeAssistant, call: ServiceCall) -> AlertRosterConfigEntry:
     """Find the station this call is aimed at.
 
     With one station paired the target may be left out, because making every
@@ -90,7 +99,7 @@ def _entry_data(hass: HomeAssistant, call: ServiceCall) -> AlertRosterData:
             raise ServiceValidationError(f"{entry_id} is not an AlertRoster station")
         if entry.state is not ConfigEntryState.LOADED:
             raise ServiceValidationError(f"the AlertRoster station {entry.title} is not loaded")
-        return cast("AlertRosterData", entry.runtime_data)
+        return cast("AlertRosterConfigEntry", entry)
 
     if not entries:
         raise ServiceValidationError("no AlertRoster station is set up")
@@ -100,11 +109,11 @@ def _entry_data(hass: HomeAssistant, call: ServiceCall) -> AlertRosterData:
             f"several AlertRoster stations are paired ({names}); "
             f"name the one to use in the action's station field"
         )
-    return entries[0].runtime_data
+    return entries[0]
 
 
 @contextlib.contextmanager
-def _station_errors(data: AlertRosterData) -> Iterator[None]:
+def _station_errors(entry: AlertRosterConfigEntry) -> Iterator[None]:
     """Turn every way a station call can fail into a readable error.
 
     A context manager rather than a wrapper taking the coroutine: the calls it
@@ -113,25 +122,28 @@ def _station_errors(data: AlertRosterData) -> Iterator[None]:
     """
     try:
         yield
+    except InvalidAlertId as err:
+        # Never left the process: the id came from the automation and `api.py`
+        # refused it before building a URL. Calling that a station failure
+        # would point the reader at the wrong machine.
+        raise ServiceValidationError(f"{err}") from err
     except CannotConnect as err:
-        raise HomeAssistantError(
-            f"could not reach the AlertRoster station {data.station_name}"
-        ) from err
+        raise HomeAssistantError(f"could not reach the AlertRoster station {entry.title}") from err
     except InvalidAuth as err:
         # AHA-9 turns this into a reauth flow; until that step exists, starting
         # one would send the user to a step that is not there.
         raise HomeAssistantError(
-            f"the AlertRoster station {data.station_name} no longer recognises "
+            f"the AlertRoster station {entry.title} no longer recognises "
             f"this Home Assistant -- pair it again"
         ) from err
     except StationError as err:
         detail = err.extra.get("details") or err.error
         raise HomeAssistantError(
-            f"the AlertRoster station {data.station_name} refused the request: {detail}"
+            f"the AlertRoster station {entry.title} refused the request: {detail}"
         ) from err
     except AlertRosterError as err:
         raise HomeAssistantError(
-            f"the AlertRoster station {data.station_name} failed the request: {err}"
+            f"the AlertRoster station {entry.title} failed the request: {err}"
         ) from err
 
 
@@ -143,9 +155,9 @@ async def _async_raise(call: ServiceCall) -> ServiceResponse:
     against a station, the second call's fields are ignored -- so changing a
     live alert means resolving it and raising a new one.
     """
-    data = _entry_data(call.hass, call)
-    with _station_errors(data):
-        alert = await data.client.create_alert(
+    entry = _target_entry(call.hass, call)
+    with _station_errors(entry):
+        alert = await entry.runtime_data.client.create_alert(
             title=call.data[ATTR_TITLE],
             detail=call.data.get(ATTR_DETAIL),
             urgency=call.data.get(ATTR_URGENCY),
@@ -164,23 +176,30 @@ async def _async_resolve(call: ServiceCall) -> ServiceResponse:
     if (alert_id is None) == (dedup_key is None):
         raise ServiceValidationError("give either alert_id or dedup_key, not both and not neither")
 
-    data = _entry_data(call.hass, call)
+    entry = _target_entry(call.hass, call)
 
     if alert_id is None:
         # §6.2 scopes the token to this source, so this searches what Home
         # Assistant raised, never everything the station is paging about.
-        with _station_errors(data):
-            open_alerts = await data.client.list_alerts()
+        with _station_errors(entry):
+            open_alerts = await entry.runtime_data.client.list_alerts()
         matches = [a for a in open_alerts if a.get("dedup_key") == dedup_key]
         if not matches:
-            raise HomeAssistantError(
-                f"the AlertRoster station {data.station_name} has no open alert "
+            # The automation named a key nothing is open under -- bad input, not
+            # a broken station, so no stack trace in the log.
+            raise ServiceValidationError(
+                f"the AlertRoster station {entry.title} has no open alert "
                 f"with dedup_key {dedup_key!r}"
             )
-        alert_id = str(matches[0]["id"])
+        found = matches[0].get("id")
+        if not isinstance(found, str):
+            raise HomeAssistantError(
+                f"the AlertRoster station {entry.title} returned an alert with no id"
+            )
+        alert_id = found
 
-    with _station_errors(data):
-        alert = await data.client.resolve_alert(alert_id)
+    with _station_errors(entry):
+        alert = await entry.runtime_data.client.resolve_alert(alert_id)
     return dict(alert)
 
 

@@ -13,27 +13,34 @@ from dataclasses import dataclass
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import CONF_HOST, CONF_PORT, CONF_TOKEN
 from homeassistant.core import HomeAssistant
+from homeassistant.helpers import config_validation as cv
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.typing import ConfigType
 
 from .api import AlertRosterClient
-from .const import CONF_STATION_NAME
+from .const import DOMAIN
 from .services import async_setup_services
 
 PLATFORMS: list[str] = []
+
+# There is no YAML for this integration -- a station is paired through the
+# config flow, because pairing needs a code off the station's screen. Saying so
+# means `alertroster:` in configuration.yaml is refused rather than silently
+# ignored.
+CONFIG_SCHEMA = cv.config_entry_only_config_schema(DOMAIN)
 
 
 @dataclass
 class AlertRosterData:
     """What one paired station needs at runtime.
 
-    `station_name` is carried alongside the client because every error this
-    integration raises has to name the station -- an automation trace saying
-    "the request failed" is not worth reading.
+    Deliberately not carrying the station's name: §3.6 has every error name the
+    station, and a name snapshotted here would keep naming the old one after
+    somebody renames the entry in the UI. Callers read `entry.title`, which
+    follows the rename.
     """
 
     client: AlertRosterClient
-    station_name: str
 
 
 type AlertRosterConfigEntry = ConfigEntry[AlertRosterData]
@@ -58,10 +65,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: AlertRosterConfigEntry) 
             entry.data[CONF_HOST],
             entry.data[CONF_PORT],
             entry.data[CONF_TOKEN],
-        ),
-        # The station cannot tell us its name until §5 item 1 ships, so the
-        # entry title -- which is the address until then -- is the best label.
-        station_name=entry.data.get(CONF_STATION_NAME) or entry.title,
+        )
     )
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
     return True
