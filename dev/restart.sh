@@ -3,5 +3,6 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 . dev/_env.sh
-ssh "$HA_HOST" "docker restart $HA_CONTAINER >/dev/null; until curl -sS -o /dev/null -m 3 http://localhost:8123/ 2>/dev/null; do sleep 3; done"
+ssh "$HA_HOST" "docker restart $HA_CONTAINER >/dev/null"
+wait_for_ha
 echo "restarted, $HA_URL is answering"

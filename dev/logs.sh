@@ -5,4 +5,7 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 . dev/_env.sh
 filter="${1:-alertroster|config_entries|zeroconf|ERROR|WARNING}"
-exec ssh -t "$HA_HOST" "docker logs -f --tail=200 $HA_CONTAINER 2>&1 | grep --line-buffered -Ei '$filter'"
+# printf %q so a pattern containing a quote cannot break out of the remote
+# command string and run as shell on the rig.
+exec ssh -t "$HA_HOST" \
+  "FILTER=$(printf '%q' "$filter"); docker logs -f --tail=200 $HA_CONTAINER 2>&1 | grep --line-buffered -Ei \"\$FILTER\""

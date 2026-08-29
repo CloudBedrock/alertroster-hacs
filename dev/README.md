@@ -23,7 +23,7 @@ Restart only the `homeassistant` container, never the whole stack.
 ## The loop
 
 ```sh
-./dev/sync.sh          # rsync the integration up, restart HA, wait for it to answer (~10s)
+./dev/sync.sh          # rsync the integration up, restart HA, wait for it to answer (<15s)
 ./dev/sync.sh -n       # sync without restarting
 ./dev/restart.sh       # restart without syncing
 ./dev/logs.sh          # follow the log, filtered to this integration
