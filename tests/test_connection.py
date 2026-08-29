@@ -22,7 +22,11 @@ from pytest_homeassistant_custom_component.common import MockConfigEntry
 
 from custom_components.alertroster import connection as connection_module
 from custom_components.alertroster.api import AlertRosterClient
-from custom_components.alertroster.connection import BACKOFF_MAX, StationConnection
+from custom_components.alertroster.connection import (
+    BACKOFF_MAX,
+    BACKOFF_START,
+    StationConnection,
+)
 from custom_components.alertroster.const import CONF_SOURCE_ID, CONF_STATION_NAME, DOMAIN
 
 from .conftest import FakeStation
@@ -94,6 +98,19 @@ def _seeds(station: FakeStation) -> int:
     return station.requests.count(("GET", "/v1/alerts"))
 
 
+def _bare_connection(hass: HomeAssistant, station: FakeStation) -> StationConnection:
+    """A connection that was never started, for asserting on policy directly.
+
+    Reading the backoff off the object beats timing it: timing would mean
+    sitting through a real minute of it to learn what arithmetic already says.
+    """
+    return StationConnection(
+        hass,
+        MockConfigEntry(domain=DOMAIN, title="studio"),  # type: ignore[arg-type]
+        AlertRosterClient(async_get_clientsession(hass), station.host, station.port, "lat_x"),
+    )
+
+
 def _open_alert(station: FakeStation, alert_id: str, title: str) -> dict[str, Any]:
     """Put an open alert on the station without going through HTTP.
 
@@ -152,14 +169,20 @@ async def test_setup_does_not_wait_for_an_unreachable_station(
 
 
 async def test_open_alerts_hands_out_a_copy(hass: HomeAssistant, station: FakeStation) -> None:
-    """A caller that edits what it was given must not be editing the state."""
+    """A caller that edits what it was given must not be editing the state.
+
+    Nested as well as top-level: an alert carries the `cloud` object §2 passes
+    through untouched, and a shallow copy would hand that out by reference.
+    """
     _open_alert(station, "la_copy", "Mine")
     entry = await _setup(hass, station)
     connection = await _connected(entry)
 
     connection.open_alerts[0]["title"] = "vandalised"
+    connection.open_alerts[0]["cloud"]["synced"] = "vandalised"
 
     assert connection.open_alerts[0]["title"] == "Mine"
+    assert connection.open_alerts[0]["cloud"] == {"synced": False}
 
 
 async def test_an_alert_with_no_id_is_dropped(hass: HomeAssistant, station: FakeStation) -> None:
@@ -279,17 +302,27 @@ async def test_reconnect_re_seeds_from_the_alerts_endpoint(
 async def test_the_shipped_stations_join_snapshot_is_applied_too(
     hass: HomeAssistant, station: FakeStation
 ) -> None:
-    """A divergence from §4.6, so it is belt-and-braces rather than the route."""
+    """A divergence from §4.6, so it is belt-and-braces rather than the route.
+
+    Seed and snapshot are made to disagree on purpose. Left agreeing -- which
+    is what a real station does -- this test would pass with the snapshot
+    branch deleted, because the reconnect's `GET /v1/alerts` would deliver the
+    same alert and nothing could tell the two paths apart.
+    """
     entry = await _setup(hass, station)
     connection = await _connected(entry)
 
-    _open_alert(station, "la_snap", "In the snapshot")
+    only_in_the_snapshot = {"id": "la_snap", "status": "triggered", "title": "Only pushed"}
+    station.snapshot_alerts = [only_in_the_snapshot]
     await station.drop_sockets()
 
     await _until(
         lambda: [a["id"] for a in connection.open_alerts] == ["la_snap"],
         "the join snapshot to be applied",
     )
+    # And the seed really did not carry it -- otherwise the assertion above
+    # proves nothing about the snapshot.
+    assert station.alerts == {}
 
 
 async def test_disconnected_while_the_socket_is_refused(
@@ -322,11 +355,7 @@ async def test_backoff_doubles_from_one_second_and_caps_at_sixty(
     Read off the policy rather than timed: timing it would mean sitting through
     a minute of real backoff to learn what arithmetic already says.
     """
-    connection = StationConnection(
-        hass,
-        MockConfigEntry(domain=DOMAIN, title="studio"),  # type: ignore[arg-type]
-        AlertRosterClient(async_get_clientsession(hass), station.host, station.port, "lat_x"),
-    )
+    connection = _bare_connection(hass, station)
 
     delays = [connection._next_backoff() for _ in range(10)]  # noqa: SLF001
 
@@ -335,6 +364,40 @@ async def test_backoff_doubles_from_one_second_and_caps_at_sixty(
         # first retry never comes sooner than half a second.
         assert undelayed / 2 <= delay <= undelayed
     assert max(delays) <= BACKOFF_MAX
+
+
+async def test_a_socket_that_drops_at_once_does_not_reset_the_backoff(
+    hass: HomeAssistant, station: FakeStation
+) -> None:
+    """A station that accepts the upgrade and hangs up must still be backed off.
+
+    Resetting on the handshake alone pinned the retry at ~1 s -- plus a full
+    re-seed each time -- for as long as the station kept doing it, which is
+    precisely the case the backoff exists for.
+    """
+    connection = _bare_connection(hass, station)
+
+    # Six flaps, each connecting and dropping immediately.
+    for _ in range(6):
+        connection._async_on_connect()  # noqa: SLF001
+        connection._next_backoff()  # noqa: SLF001
+
+    assert connection._next_backoff() >= BACKOFF_MAX / 2  # noqa: SLF001
+
+
+async def test_a_socket_that_held_resets_the_backoff(
+    hass: HomeAssistant, station: FakeStation, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A connection that worked means the next outage starts from 1 s again."""
+    connection = _bare_connection(hass, station)
+    for _ in range(6):
+        connection._next_backoff()  # noqa: SLF001
+
+    connection._async_on_connect()  # noqa: SLF001
+    # As if that socket had been up for well over the stability window.
+    connection._connected_at = asyncio.get_running_loop().time() - 10_000  # noqa: SLF001
+
+    assert connection._next_backoff() <= BACKOFF_START  # noqa: SLF001
 
 
 # -- revocation -----------------------------------------------------------
@@ -447,14 +510,16 @@ async def test_reload_leaves_one_socket(hass: HomeAssistant, station: FakeStatio
     assert len(station.sockets) == 1
 
 
-async def test_unload_survives_an_events_task_that_died(
+async def test_a_bug_in_the_loop_does_not_leave_the_entry_looking_connected(
     hass: HomeAssistant, station: FakeStation, fast_backoff: None, caplog: pytest.LogCaptureFixture
 ) -> None:
-    """A bug in the loop must not leave an entry that cannot be removed.
+    """The one state that must never happen (CLAUDE.md: never show stale state).
 
-    Every failure the *station* can cause is already handled, so this stands in
-    for one this file caused itself; what is being asserted is that the user
-    still has a way out of it, and that it was not swallowed on the way.
+    Every failure the *station* can cause is handled by name; this stands in
+    for one this file caused itself. It must be reported, it must not leave
+    `connected` true with nobody listening, and it must not end the task --
+    a station that pages people is worth retrying even when we are the broken
+    end of it.
     """
     entry = await _setup(hass, station)
     connection = await _connected(entry)
@@ -467,10 +532,58 @@ async def test_unload_survives_an_events_task_that_died(
 
     connection._async_seed = explode  # type: ignore[method-assign]  # noqa: SLF001
     await station.drop_sockets()
-    # The crash comes after the backoff, so waiting on `connected` would race
-    # the sleep and cancel the task before it ever got to fall over.
+    await asyncio.wait_for(exploded.wait(), _TIMEOUT)
+
+    assert connection.connected is False
+    assert "a bug, not a station" in caplog.text
+
+    # Still trying: the task did not die with it.
+    exploded.clear()
+    await asyncio.wait_for(exploded.wait(), _TIMEOUT)
+
+    # And it recovers once the bug stops happening.
+    del connection._async_seed  # noqa: SLF001
+    await _connected(entry)
+
+
+async def test_a_listener_that_raises_does_not_take_the_connection_down(
+    hass: HomeAssistant, station: FakeStation, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Listeners are other platforms' entities; one of them is not the socket's problem."""
+    entry = await _setup(hass, station)
+    connection = await _connected(entry)
+
+    def bad() -> None:
+        raise RuntimeError("a listener with a bug")
+
+    notified: list[None] = []
+    connection.async_add_listener(bad)
+    connection.async_add_listener(lambda: notified.append(None))
+
+    await station.push("alert.triggered", _open_alert(station, "la_guard", "Guarded"))
+
+    await _until(lambda: bool(notified), "the other listener to be notified anyway")
+    assert connection.connected is True
+    assert "a listener with a bug" in caplog.text
+
+
+async def test_unload_still_works_after_a_bug_in_the_loop(
+    hass: HomeAssistant, station: FakeStation, fast_backoff: None
+) -> None:
+    """An entry that cannot be removed is a worse failure than the one that caused it."""
+    entry = await _setup(hass, station)
+    connection = await _connected(entry)
+
+    exploded = asyncio.Event()
+
+    async def explode() -> None:
+        exploded.set()
+        raise RuntimeError("a bug, not a station")
+
+    connection._async_seed = explode  # type: ignore[method-assign]  # noqa: SLF001
+    await station.drop_sockets()
     await asyncio.wait_for(exploded.wait(), _TIMEOUT)
 
     assert await hass.config_entries.async_unload(entry.entry_id)
     await hass.async_block_till_done()
-    assert "a bug, not a station" in caplog.text
+    assert connection.connected is False
