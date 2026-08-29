@@ -1,4 +1,8 @@
 [tool.ruff]
+# Deliberately behind the Python that Home Assistant 2026.8.3 requires
+# (>=3.14.2). Raising this to py314 makes ruff rewrite `except (A, B):` into
+# PEP 758's unparenthesized form, which no interpreter before 3.14 can even
+# parse, in exchange for nothing.
 target-version = "py313"
 line-length = 100
 
@@ -8,3 +12,9 @@ select = ["E", "F", "I", "UP", "B"]
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
+
+# `pytest-homeassistant-custom-component` ships no py.typed marker, so its
+# helpers are untyped to mypy. That is the library's business, not ours.
+[[tool.mypy.overrides]]
+module = "pytest_homeassistant_custom_component.*"
+ignore_missing_imports = true
