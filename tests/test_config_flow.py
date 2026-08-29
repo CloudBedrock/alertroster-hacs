@@ -284,3 +284,36 @@ async def test_the_token_reaches_no_log_record(
     assert token not in caplog.text
     # The one debug line the flow does emit names the source, and says so.
     assert station.source_id in caplog.text
+
+
+# -- what the station's Pairing list will say ------------------------------
+
+
+async def test_the_pair_request_sends_this_instance_s_name(
+    hass: HomeAssistant, station: FakeStation
+) -> None:
+    """AHA-32: two Home Assistants on one station must be tellable apart.
+
+    The station's Pairing list shows this name, so sending the literal "Home
+    Assistant" would leave every instance looking identical there.
+    """
+    hass.config.location_name = "Beach House"
+
+    result = await _start(hass)
+    result = await _submit(hass, result["flow_id"], host=station.host, port=station.port)
+    await _submit(hass, result["flow_id"], code=station.valid_code)
+
+    assert station.paired_names == ["Beach House"]
+
+
+async def test_an_unnamed_instance_still_pairs_as_something(
+    hass: HomeAssistant, station: FakeStation
+) -> None:
+    """An empty instance name must not become an empty row on the station."""
+    hass.config.location_name = "   "
+
+    result = await _start(hass)
+    result = await _submit(hass, result["flow_id"], host=station.host, port=station.port)
+    await _submit(hass, result["flow_id"], code=station.valid_code)
+
+    assert station.paired_names == ["Home Assistant"]
