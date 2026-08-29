@@ -40,8 +40,8 @@ REQUEST_TIMEOUT = aiohttp.ClientTimeout(total=10)
 
 # No receive timeout on the events socket -- it is meant to stay open for days
 # and a quiet station is the normal case, not a fault. Liveness comes from the
-# heartbeat instead, which turns a silently dead TCP connection into a close we
-# can react to.
+# heartbeat instead: an unanswered ping arrives as a WSMsgType.ERROR frame,
+# which is the only thing that distinguishes a dead link from a quiet one.
 EVENTS_TIMEOUT = aiohttp.ClientWSTimeout(ws_receive=None, ws_close=10.0)
 EVENTS_HEARTBEAT = 30.0
 
@@ -399,10 +399,13 @@ class AlertRosterClient:
         It is yielded like any other event; a caller that ignores it and
         re-seeds from `list_alerts()` is still correct.
 
-        A station that closes the socket ends the iterator; a station that stops
-        answering raises `CannotConnect`. Those are different outcomes on
-        purpose -- the caller reconnects either way, but only the second is a
-        fault worth saying out loud.
+        How the socket ends, which the reconnect logic has to reason about:
+        a clean close ends the iterator, and so does an abruptly reset
+        connection -- aiohttp turns that into a CLOSED message rather than
+        raising. A link that goes silent without being closed is the case the
+        heartbeat exists for, and that one raises `CannotConnect`, as does a
+        protocol error. So the caller must treat a plain end-of-iteration as
+        "reconnect" too; it is not proof the station meant to say goodbye.
 
         This is an async generator holding an open socket, so a caller that may
         abandon it part-way (`break` out of the `async for`) should wrap it in
@@ -446,8 +449,10 @@ class AlertRosterClient:
                 f"the AlertRoster station at {self._host}:{self._port} refused the events socket"
             ) from None
         except aiohttp.ClientError:
-            # Only the upgrade reaches here: once the socket is open, aiohttp
-            # turns a connection error into an ERROR frame rather than raising.
+            # Only the upgrade reaches here. Once the socket is open a
+            # connection error is delivered as a CLOSED message and quietly ends
+            # the iterator; only protocol errors and the heartbeat's pong
+            # timeout arrive as ERROR frames.
             raise CannotConnect(
                 f"could not open the events socket to the AlertRoster station "
                 f"at {self._host}:{self._port}"
