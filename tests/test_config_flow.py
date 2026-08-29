@@ -13,6 +13,7 @@ from typing import Any
 
 import pytest
 from homeassistant import config_entries
+from homeassistant.config_entries import ConfigFlowResult
 from homeassistant.const import CONF_HOST, CONF_PORT, CONF_TOKEN
 from homeassistant.core import HomeAssistant
 from homeassistant.data_entry_flow import FlowResultType
@@ -29,14 +30,14 @@ from custom_components.alertroster.const import (
 from .conftest import FakeStation
 
 
-async def _start(hass: HomeAssistant) -> dict[str, Any]:
+async def _start(hass: HomeAssistant) -> ConfigFlowResult:
     """Open the flow the way Add Integration does."""
     return await hass.config_entries.flow.async_init(
         DOMAIN, context={"source": config_entries.SOURCE_USER}
     )
 
 
-async def _submit(hass: HomeAssistant, flow_id: str, **fields: Any) -> dict[str, Any]:
+async def _submit(hass: HomeAssistant, flow_id: str, **fields: Any) -> ConfigFlowResult:
     """Fill in the form on screen."""
     return await hass.config_entries.flow.async_configure(flow_id, fields)
 
@@ -74,7 +75,9 @@ async def test_the_port_defaults_to_4747(hass: HomeAssistant) -> None:
     """The default is offered, because most stations are on it -- but not all."""
     result = await _start(hass)
 
-    assert result["data_schema"]({"host": "studio.local"})["port"] == DEFAULT_PORT
+    schema = result["data_schema"]
+    assert schema is not None
+    assert schema({"host": "studio.local"})["port"] == DEFAULT_PORT
 
 
 async def test_station_name_titles_the_entry_once_discover_ships(
@@ -248,14 +251,16 @@ async def test_a_closed_window_is_currently_indistinguishable(
 
 
 async def test_a_station_that_goes_away_mid_flow_says_cannot_connect(
-    hass: HomeAssistant, station: FakeStation, unused_tcp_port: int
+    hass: HomeAssistant, station: FakeStation
 ) -> None:
     """The address was good at the probe and is not any more."""
     result = await _start(hass)
     result = await _submit(hass, result["flow_id"], host=station.host, port=station.port)
 
-    # Move the station out from under the flow between the two steps.
-    hass.config_entries.flow._progress[result["flow_id"]]._port = unused_tcp_port
+    # Take the station off the air rather than reaching into the flow's own
+    # attributes: a rename inside Home Assistant should not break this test,
+    # and a restarting station is the thing actually being described.
+    await station.stop()
 
     result = await _submit(hass, result["flow_id"], code=station.valid_code)
 

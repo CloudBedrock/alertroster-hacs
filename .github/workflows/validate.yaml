@@ -41,5 +41,11 @@ jobs:
         run: ruff format --check .
       - name: mypy
         run: mypy --strict custom_components/alertroster
+      - name: mypy (tests)
+        # Not --strict: the point is to catch fixture-signature drift and wrong
+        # annotations in the suite. It earned its place immediately -- it found
+        # `events()` typed as an AsyncIterator, which has no `aclose()`, while
+        # its own docstring tells callers to wrap it in `aclosing()`.
+        run: mypy tests
       - name: pytest
         run: pytest
