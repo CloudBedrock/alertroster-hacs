@@ -21,7 +21,9 @@ divergence at the point it matters):
   test can also describe the station we are asking for.
 * A wrong code, a closed pairing window and a station with no pairing authority
   are all the same bodiless `403`, on purpose, so a guesser learns nothing.
-* The events socket sends a `snapshot` frame on join.
+* The events socket sends a `snapshot` frame on join. `send_join_snapshot`
+  turns that off, to be the station `LOCAL_ACK_PROTOCOL.md` §4.6 describes
+  rather than the one that shipped.
 """
 
 from __future__ import annotations
@@ -82,6 +84,24 @@ class FakeStation:
         self.alerts: dict[str, dict[str, Any]] = {}
         self.sockets: list[web.WebSocketResponse] = []
 
+        # The shipped service sends a `snapshot` on join; §4.6 says a source
+        # gets transitions only. Turn it off to be the station the document
+        # describes -- which is how a test proves the post-reconnect re-seed
+        # is doing the work, rather than the snapshot quietly covering for it.
+        self.send_join_snapshot = True
+
+        # What the join snapshot carries, when it must differ from what
+        # `GET /v1/alerts` returns. `None` means "the open alerts", which is
+        # what the real station sends; a test sets this to tell the two apart,
+        # because otherwise the seed and the snapshot deliver the same thing
+        # and an assertion cannot say which one did the work.
+        self.snapshot_alerts: list[dict[str, Any]] | None = None
+
+        # Refuse the events upgrade with this status instead of accepting it,
+        # so a test can hold the socket down while HTTP keeps working -- a
+        # station whose LAN listener is up but whose socket is not.
+        self.events_status: int | None = None
+
         # Every (method, path) served, so a test can assert on what was called
         # -- and, for the token tests, on what was not.
         self.requests: list[tuple[str, str]] = []
@@ -116,7 +136,18 @@ class FakeStation:
         app.router.add_post("/v1/alerts/{alert_id}/resolve", self._resolve_alert)
         app.router.add_get("/v1/alerts/{alert_id}", self._get_alert)
         app.router.add_get("/v1/events", self._events)
+        # Without this the fixture's `server.close()` sits waiting out
+        # aiohttp's shutdown timeout for every events socket still open --
+        # which, now that the integration holds one for the life of the entry,
+        # is every test that sets one up. Closing them here is aiohttp's own
+        # answer to that, and it is the station going away, which is a thing a
+        # real one does.
+        app.on_shutdown.append(self._shutdown)
         return app
+
+    async def _shutdown(self, app: web.Application) -> None:
+        """Close the events sockets so the server can actually stop."""
+        await self.drop_sockets()
 
     @web.middleware
     async def _record(self, request: web.Request, handler: Any) -> web.StreamResponse:
@@ -184,10 +215,11 @@ class FakeStation:
             return self._unauthorized()
         if self.send_garbage:
             return web.Response(body=b"<html>not json</html>", content_type="text/html", status=500)
-        open_alerts = [
-            a for a in self.alerts.values() if a["status"] in ("triggered", "acknowledged")
-        ]
-        return web.json_response({"alerts": list(reversed(open_alerts))})
+        return web.json_response({"alerts": list(reversed(self._open_alerts()))})
+
+    def _open_alerts(self) -> list[dict[str, Any]]:
+        """The alerts §4.3 calls open -- what both the list and the snapshot carry."""
+        return [a for a in self.alerts.values() if a["status"] in ("triggered", "acknowledged")]
 
     async def _get_alert(self, request: web.Request) -> web.Response:
         """§4.3. One alert of any status."""
@@ -243,11 +275,20 @@ class FakeStation:
         """§4.6. A `401` here is a failed upgrade, not a normal response."""
         if not self._authorized(request):
             return self._unauthorized()
+        if self.events_status is not None:
+            return web.json_response({"error": "unavailable"}, status=self.events_status)
 
         socket = web.WebSocketResponse()
         await socket.prepare(request)
         self.sockets.append(socket)
-        await socket.send_json({"event": "snapshot", "alerts": list(self.alerts.values())})
+        if self.send_join_snapshot:
+            # Open alerts only, like `GET /v1/alerts` and like the real
+            # station -- verified on one, 2026-08-29. Sending everything here
+            # would have made the fake the only place a closed alert could
+            # arrive in a snapshot, and a test written against that would be
+            # testing the fake.
+            alerts = self._open_alerts() if self.snapshot_alerts is None else self.snapshot_alerts
+            await socket.send_json({"event": "snapshot", "alerts": alerts})
         try:
             async for _message in socket:
                 pass
