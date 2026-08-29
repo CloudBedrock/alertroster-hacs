@@ -18,6 +18,7 @@ from homeassistant.core import Event, HomeAssistant, callback
 from homeassistant.helpers.template import Template
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
+from custom_components.alertroster.api import StationEvent
 from custom_components.alertroster.connection import _CLOSES_ALERT, _OPENS_ALERT
 from custom_components.alertroster.const import (
     ATTR_ALERT,
@@ -383,23 +384,76 @@ async def test_a_transition_with_no_alert_fires_nothing(
     assert bus.types() == [EVENT_TRIGGERED]
 
 
+async def test_a_transition_with_an_empty_alert_fires_nothing(
+    hass: HomeAssistant, station: FakeStation, bus: _Bus
+) -> None:
+    """`"alert": {}` is the same broken frame with a different spelling.
+
+    It survives `api.py`'s parser, which only checks the value is a dict, and
+    `connection.py` discards it for having no id -- so if this fired, every
+    automation would wake to an empty alert and nothing would compensate.
+    """
+    await _setup(hass, station)
+
+    await station.push("alert.expired", {})
+    await station.push("alert.triggered", _alert())
+    await _until(lambda: bool(bus.events), "the trigger after it to fire")
+
+    assert bus.types() == [EVENT_TRIGGERED]
+
+
 # -- the wiring -----------------------------------------------------------
 
 
-async def test_unloading_the_entry_stops_the_events(
+async def test_unloading_the_entry_unregisters_the_listener(
     hass: HomeAssistant, station: FakeStation, bus: _Bus
 ) -> None:
-    """An unloaded entry must not still be firing on the bus."""
+    """An unloaded entry must not still be firing on the bus.
+
+    "No events after the unload" is on its own too weak to test the
+    `entry.async_on_unload` wiring: `async_unload_entry` also stops the socket,
+    so a listener that was never unregistered would look identical. So this
+    fires one first as a positive control, and then asserts the registration
+    itself is gone rather than merely quiet.
+    """
     entry = await _setup(hass, station)
+    connection = entry.runtime_data.connection
+
+    await station.push("alert.triggered", _alert())
+    await _until(lambda: bool(bus.events), "an event to fire while loaded")
+    fired_while_loaded = bus.types()
 
     assert await hass.config_entries.async_unload(entry.entry_id)
     await hass.async_block_till_done()
 
-    await station.push("alert.triggered", _alert())
+    await station.push("alert.triggered", _alert("alt_2"))
     await asyncio.sleep(0.05)
     await hass.async_block_till_done()
 
-    assert bus.types() == []
+    assert fired_while_loaded == [EVENT_TRIGGERED]
+    assert bus.types() == fired_while_loaded  # nothing more arrived
+    # Reaching into the private set on purpose: it is the only difference
+    # between "the unload callback ran" and "the socket happened to be shut".
+    assert connection._transitions == {}
+
+
+async def test_reloading_the_entry_fires_each_transition_once(
+    hass: HomeAssistant, station: FakeStation, bus: _Bus
+) -> None:
+    """A reload sets the entry up again; it must not leave two listeners behind."""
+    entry = await _setup(hass, station)
+
+    await hass.config_entries.async_reload(entry.entry_id)
+    await hass.async_block_till_done()
+    connection = entry.runtime_data.connection
+    await _until(lambda: connection.connected, "the socket to come back after the reload")
+
+    await station.push("alert.expired", _alert())
+    await _until(lambda: bool(bus.events), "the expiry to fire")
+    await asyncio.sleep(0.05)
+    await hass.async_block_till_done()
+
+    assert bus.types() == [EVENT_UNACKNOWLEDGED]
 
 
 async def test_a_listener_that_raises_does_not_stop_the_others(
@@ -410,19 +464,30 @@ async def test_a_listener_that_raises_does_not_stop_the_others(
     Registered directly on the connection rather than on the bus, because it is
     `_async_dispatch`'s guard being tested -- a listener raising there would
     otherwise take the socket task down with it.
+
+    The recorder is registered *after* the one that raises, and dispatch runs
+    in registration order, so "the others" here means listeners that come after
+    the failure -- the ones a guard that merely logged and stopped would lose.
     """
     entry = await _setup(hass, station)
     connection = entry.runtime_data.connection
+    reached: list[str] = []
 
-    def explode(_event: Any) -> None:
+    def explode(_event: StationEvent) -> None:
         raise RuntimeError("listener is broken")
 
+    def record(event: StationEvent) -> None:
+        reached.append(event.event)
+
     connection.async_add_transition_listener(explode)
+    connection.async_add_transition_listener(record)
 
     await station.push("alert.expired", _alert())
     await _until(lambda: bool(bus.events), "the expiry to fire anyway")
+    await _until(lambda: bool(reached), "the listener after the broken one to run")
     await hass.async_block_till_done()
 
+    assert reached == ["alert.expired"]
     assert bus.types() == [EVENT_UNACKNOWLEDGED]
     assert connection.connected
     assert "listener is broken" in caplog.text
