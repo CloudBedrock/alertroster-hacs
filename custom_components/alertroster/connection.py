@@ -103,7 +103,13 @@ class StationConnection:
         # back; a transition cannot be recovered that way -- by the time an
         # `alert.expired` has been folded in, the alert is simply gone from the
         # set, indistinguishable from one that was resolved.
-        self._transitions: set[Callable[[StationEvent], None]] = set()
+        #
+        # A dict rather than a set, used only for its keys: nothing depends on
+        # the order these run in, but a *fixed* order is what makes the
+        # "one raising does not cost the others" guarantee testable. Over a set
+        # that test passes or fails on hash ordering, which is how a real
+        # regression would have slipped through it.
+        self._transitions: dict[Callable[[StationEvent], None], None] = {}
         self._task: asyncio.Task[None] | None = None
         self._connected = False
         self._failures = 0
@@ -167,11 +173,11 @@ class StationConnection:
         Home Assistant's bus and ignores what is not in it, so a station that
         grows a new event under §9 needs a change in one place rather than two.
         """
-        self._transitions.add(transition)
+        self._transitions[transition] = None
 
         @callback
         def remove() -> None:
-            self._transitions.discard(transition)
+            self._transitions.pop(transition, None)
 
         return remove
 
