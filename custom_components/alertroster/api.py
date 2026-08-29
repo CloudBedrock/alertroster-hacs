@@ -141,6 +141,23 @@ class PairResult:
 
 
 @dataclass(frozen=True)
+class StationInfo:
+    """What an unauthenticated probe could learn about a station.
+
+    Every field is optional because today it learns nothing: `GET /v1/discover`
+    is REQUIREMENTS.md §5 item 1, a change requested of the station and not yet
+    shipped, so a reachable station answers the probe with a `404`. The shape is
+    here now so the config flow can read `pairing_window_open` the day it
+    appears rather than being reshaped around it -- `None` means "the station
+    did not say", which is not the same as `False`.
+    """
+
+    name: str | None = None
+    version: str | None = None
+    pairing_window_open: bool | None = None
+
+
+@dataclass(frozen=True)
 class StationEvent:
     """One frame from the events socket (§4.6).
 
@@ -214,8 +231,21 @@ class AlertRosterClient:
         return alert_id
 
     def _url(self, path: str) -> URL:
-        """Build an absolute URL for a `/v1` path."""
-        return URL.build(scheme="http", host=self._host, port=self._port, path=path)
+        """Build an absolute URL for a `/v1` path.
+
+        A host that cannot form a URL at all -- empty, or carrying the scheme
+        or the `:port` someone pasted in from a browser -- makes `URL.build`
+        raise `ValueError`. Left alone that escapes from the middle of a
+        request, past every caller's `except CannotConnect`, as a bare
+        `ValueError`. Unreachable is what it means to the caller, so that is
+        what it is turned into here, once, rather than at each call site.
+        """
+        try:
+            return URL.build(scheme="http", host=self._host, port=self._port, path=path)
+        except ValueError:
+            raise CannotConnect(
+                f"{self._host!r} is not a usable address for an AlertRoster station"
+            ) from None
 
     def _auth_headers(self) -> dict[str, str]:
         """Bearer header for an authenticated request (§6.1 step 4)."""
@@ -283,6 +313,37 @@ class AlertRosterClient:
         except (aiohttp.ContentTypeError, ValueError):
             return {}
         return decoded if isinstance(decoded, dict) else {}
+
+    async def probe(self) -> StationInfo:
+        """Check the station answers, without a token (REQUIREMENTS.md §3.2 step 1).
+
+        Raises `CannotConnect` and nothing else: **any** HTTP response means
+        something is listening, so a `404` (no `/v1/discover` yet) and a `401`
+        (every other path, unauthenticated) both count as reachable. That is
+        deliberate rather than lax -- §4.1 has the service bind the LAN only
+        once the user ticks *Accept sources from the LAN*, so a station in its
+        default state is indistinguishable from an absent one at the socket
+        level, and the connection failure is the only honest signal of it.
+
+        Aiming at `/v1/discover` rather than at a path known to answer today
+        means this upgrades by itself: the moment the station ships the
+        endpoint, the same single request starts returning the station's name
+        and whether its pairing window is open.
+        """
+        try:
+            _status, body = await self._request("GET", "/v1/discover", authenticated=False)
+        except (InvalidAuth, StationError):
+            # Reachable, just not answering this path yet.
+            return StationInfo()
+
+        name = body.get("name")
+        version = body.get("version")
+        window_open = body.get("pairing_window_open")
+        return StationInfo(
+            name=name if isinstance(name, str) else None,
+            version=version if isinstance(version, str) else None,
+            pairing_window_open=window_open if isinstance(window_open, bool) else None,
+        )
 
     async def pair(self, code: str, name: str, kind: str = "homeassistant") -> PairResult:
         """Exchange an 8-digit pairing code for a source token (§6.1).
