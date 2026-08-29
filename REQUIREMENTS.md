@@ -39,9 +39,23 @@ about urgency — those live in the station and, when a key is configured, in th
 - `manifest.json` declares `"zeroconf": ["_alertroster-receiver._tcp.local."]`.
 - TXT records `v=1` and `name=<station name>` are read; the name becomes the flow title
   ("Pair with jims-mac").
-- Discovery is keyed on the station's host+port; a second announcement of the same station does
-  not create a second discovery card. Once paired, the entry's `unique_id` is the `source_id`
-  returned by the pair step, and rediscovery of a paired station is ignored.
+- Discovery is keyed on the station's **name**, not its host+port. A station announces one record
+  per interface (the `om` station publishes ten, including its docker and libvirt bridges and
+  loopback) and Home Assistant re-runs discovery whenever the address it picked out of that set
+  changes, so an address-shaped key produces the second discovery card this rule exists to
+  prevent — and the name is the only thing an announcement carries that survives the address
+  change below. Two stations sharing a display name would collide; the `source_id` unique id is
+  what actually stops one station being paired twice.
+- The address is chosen by asking which announced address answers, in order, rather than trusting
+  the one Home Assistant picked: most of what a station announces is unreachable from wherever HA
+  runs. Link-local is skipped (no scope id in the announcement) and loopback is tried last (on
+  another machine it is HA itself).
+- Once paired, the entry's `unique_id` is the `source_id` returned by the pair step, and
+  rediscovery of a paired station is ignored — except that a station which moved has its stored
+  host/port updated, and an entry added by hand has its station name backfilled so the next move
+  is matchable by name.
+- An announcement whose `v` is not `1`, or which carries no name, is refused rather than guessed
+  at; the manual host/port path still reaches such a station.
 - A manual path (host, port; default port 4747) exists for stations without mDNS.
 
 ### 3.2 Pairing (config flow)

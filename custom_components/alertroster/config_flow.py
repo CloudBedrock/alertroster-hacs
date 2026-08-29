@@ -1,9 +1,10 @@
 """Config flow for AlertRoster: find a station, then trade a code for a token.
 
-Two steps, in the order REQUIREMENTS.md §3.2 sets out. `user` takes a host and
-port for a station that mDNS did not find and proves something is listening
-there before asking for anything else; `pair` exchanges the 8-digit code shown
-on the station for the source token the entry is built around.
+Two ways in, one way through. `zeroconf` takes a station that announced itself
+and `user` takes a host and port for one that did not; both prove something is
+listening before asking for anything else, and both then hand off to `pair`,
+which exchanges the 8-digit code shown on the station for the source token the
+entry is built around.
 
 `reauth_confirm` is the same pairing step under a different heading, reached
 when the station stops recognising a token it once issued (§3.6). It runs
@@ -24,13 +25,20 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Mapping
+from ipaddress import ip_address
 from typing import Any
 
 import voluptuous as vol
-from homeassistant.config_entries import SOURCE_REAUTH, ConfigFlow, ConfigFlowResult
+from homeassistant.config_entries import (
+    SOURCE_REAUTH,
+    ConfigEntry,
+    ConfigFlow,
+    ConfigFlowResult,
+)
 from homeassistant.const import CONF_HOST, CONF_PORT, CONF_TOKEN
 from homeassistant.helpers import config_validation as cv
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
+from homeassistant.helpers.service_info.zeroconf import ZeroconfServiceInfo
 from yarl import URL
 
 from .api import (
@@ -50,6 +58,9 @@ from .const import (
     PAIR_KIND,
     PAIR_NAME_FALLBACK,
     PAIRING_ATTEMPTS,
+    ZEROCONF_NAME_KEY,
+    ZEROCONF_VERSION,
+    ZEROCONF_VERSION_KEY,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -92,13 +103,46 @@ def _is_usable_host(host: str, port: int) -> bool:
     return True
 
 
+def _announced_addresses(discovery_info: ZeroconfServiceInfo) -> list[str]:
+    """The addresses from an announcement that are worth trying, best first.
+
+    A station announces on every interface it has, and on a developer machine
+    that is a lot of them: the `om` station publishes ten records, among them
+    `172.17.0.1` (its docker bridge), `192.168.122.1` (its libvirt bridge) and
+    `127.0.0.1`. Only some of those can be reached from wherever Home Assistant
+    happens to be running, so the address is *chosen* by asking which one
+    answers -- `dev/stations.sh` has taken the same first-one-that-answers
+    approach since before this step existed.
+
+    `ip_address` leads because Home Assistant already picked it as the most
+    recently updated routable one, and loopback goes last rather than first:
+    when the station is on another machine, `127.0.0.1` is whatever *Home
+    Assistant* is running, so trying it before a real LAN address risks pairing
+    with the wrong thing entirely. It is kept, rather than dropped, for the
+    setup where the two really are the same host.
+
+    Link-local is dropped for a duller reason -- `fe80::` needs a scope id that
+    the announcement does not carry, so it could never be dialled.
+    """
+    routable: list[str] = []
+    loopback: list[str] = []
+    for ip in [discovery_info.ip_address, *discovery_info.ip_addresses]:
+        if ip.is_link_local or ip.is_unspecified:
+            continue
+        bucket = loopback if ip.is_loopback else routable
+        address = str(ip)
+        if address not in routable and address not in loopback:
+            bucket.append(address)
+    return routable + loopback
+
+
 class AlertRosterConfigFlow(ConfigFlow, domain=DOMAIN):
     """Handle a config flow for AlertRoster."""
 
     VERSION = 1
 
-    # Carried from the `user` step (or, once AHA-6 lands, from discovery) into
-    # the `pair` step, which needs an address to POST the code to.
+    # Carried from the `zeroconf` or `user` step into the `pair` step, which
+    # needs an address to POST the code to.
     _host: str = ""
     _port: int = DEFAULT_PORT
     _station: StationInfo = StationInfo()
@@ -114,6 +158,174 @@ class AlertRosterConfigFlow(ConfigFlow, domain=DOMAIN):
         the thing they are looking at.
         """
         return self._station.name or self._host
+
+    async def async_step_zeroconf(self, discovery_info: ZeroconfServiceInfo) -> ConfigFlowResult:
+        """Offer a station that announced itself on the LAN (§3.1, §4.1).
+
+        The flow is keyed on the station's *name*, not on its host and port,
+        which is a deliberate departure from what §3.1 asks for. A station
+        announces on every interface it has and Home Assistant re-runs
+        discovery whenever the address it picked out of that set changes, so
+        an address-shaped key produces a second discovery card for a station
+        already on screen -- the exact thing §3.1 wants prevented. The name is
+        also the only thing an announcement carries that survives the address
+        change §3.1 wants followed, which makes it the one key that can do both
+        jobs. Two stations sharing a display name would collide here; the
+        `source_id` unique id set at pairing is what actually stops one station
+        being paired twice.
+        """
+        properties = discovery_info.properties
+        if properties.get(ZEROCONF_VERSION_KEY) != ZEROCONF_VERSION:
+            return self.async_abort(reason="unsupported_version")
+
+        name = properties.get(ZEROCONF_NAME_KEY)
+        if not isinstance(name, str) or not name.strip():
+            # `name` is half of the TXT contract, and without it there is
+            # nothing to key on and nothing to title the card with.
+            return self.async_abort(reason="unsupported_version")
+        name = name.strip()
+
+        # Nothing to connect to, so the honest reason is the same one an
+        # unreachable station gets rather than a shape complaint.
+        port = discovery_info.port
+        addresses = _announced_addresses(discovery_info)
+        if not port or not addresses:
+            return self.async_abort(reason="cannot_connect")
+
+        # Dedupes repeat announcements: `raise_on_progress` aborts the second
+        # one while the first is still on screen. The unique id is only the
+        # station's name for the length of this flow -- `_async_finish`
+        # replaces it with the `source_id` before the entry is created.
+        await self.async_set_unique_id(name)
+        # The one kind of entry that *is* keyed on the name: "Ignore" stores
+        # the flow's unique id and no data at all, so neither pass in
+        # `_async_paired_station` would see it and an ignored station would
+        # come back every time it announced.
+        self._abort_if_unique_id_configured()
+
+        if (entry := self._async_paired_station(name, discovery_info)) is not None:
+            return await self._async_follow_station(entry, name, addresses, port)
+
+        if (host := await self._async_reachable_address(addresses, port)) is None:
+            return self.async_abort(reason="cannot_connect")
+
+        self._host = host
+        self._port = port
+        self._station = StationInfo(name=name)
+        # What the discovery card is titled before anyone opens it.
+        self.context["title_placeholders"] = {"name": name}
+        return await self.async_step_pair()
+
+    async def _async_follow_station(
+        self, entry: ConfigEntry, name: str, addresses: list[str], port: int
+    ) -> ConfigFlowResult:
+        """Leave a paired station alone, except for what has actually moved.
+
+        §3.1 ignores the rediscovery of a paired station, but an entry pointing
+        at where the station used to be is not much use, so an address that
+        changed is written through.
+
+        The address is only rewritten when the stored one has stopped
+        answering. Checking that first is what keeps this quiet: a station
+        re-announces on a timer, `ip_addresses` is ordered most-recently-
+        updated-first so its order moves between announcements, and picking the
+        first address that answers each time would hand the entry a different
+        host every few minutes -- each one a change, each change a reload, each
+        reload the events socket dropped and rebuilt for nothing. It also
+        leaves a host somebody typed as `studio.local` alone rather than
+        quietly replacing it with today's IP address.
+        """
+        updates: dict[str, Any] = {}
+        if entry.data.get(CONF_STATION_NAME) != name:
+            # Backfilled for entries added by hand, which have no name stored,
+            # so the next move is matchable by name rather than by an address
+            # that has already changed.
+            updates[CONF_STATION_NAME] = name
+
+        stored_host = entry.data.get(CONF_HOST)
+        still_answering = (
+            isinstance(stored_host, str)
+            and entry.data.get(CONF_PORT) == port
+            and await self._async_reachable_address([stored_host], port) is not None
+        )
+        if not still_answering and (host := await self._async_reachable_address(addresses, port)):
+            updates[CONF_HOST] = host
+            updates[CONF_PORT] = port
+
+        return self.async_update_reload_and_abort(
+            entry,
+            data_updates=updates,
+            reason="already_configured",
+            # Nothing changed on most announcements, and reloading an unchanged
+            # entry would drop and rebuild the events socket every time one
+            # arrived: a working integration restarting itself for no reason.
+            reload_even_if_entry_is_unchanged=False,
+        )
+
+    async def _async_reachable_address(self, addresses: list[str], port: int) -> str | None:
+        """The first of `addresses` that answers, or `None` if none do."""
+        session = async_get_clientsession(self.hass)
+        for address in addresses:
+            try:
+                await AlertRosterClient(session, address, port).probe()
+            except CannotConnect:
+                continue
+            return address
+        return None
+
+    def _async_paired_station(
+        self, name: str, discovery_info: ZeroconfServiceInfo
+    ) -> ConfigEntry | None:
+        """The entry already paired with this station, if there is one.
+
+        Three passes, best evidence first, because a missed match is expensive:
+        pairing through the discovery card it produces mints a second
+        `source_id`, and a second `source_id` is a second entry and a second
+        events socket for one station, which no unique id would catch.
+
+        By name first, because that is the only thing that survives the station
+        moving. Then by where the entry points, which is all an entry added
+        through the manual step has until the first announcement backfills a
+        name -- both the announced addresses and the announced hostname, since
+        the manual step invites either ("10.0.0.4 or studio.local").
+
+        Loopback is the last pass rather than part of the second, because
+        `127.0.0.1` says nothing about *which* station announced it: an entry
+        stored against it matches the first station on the LAN to announce
+        loopback on the same port. Held back to a last resort, that misfire
+        needs the announcement to match nothing else at all, while the
+        same-host install `_announced_addresses` keeps loopback for still gets
+        recognised. It cannot be resolved better from the announcement alone.
+        """
+        entries = self._async_current_entries(include_ignore=False)
+        for entry in entries:
+            if entry.data.get(CONF_STATION_NAME) == name:
+                return entry
+
+        hostname = discovery_info.hostname.rstrip(".").casefold()
+        announced = _announced_addresses(discovery_info)
+        routable = {address for address in announced if not ip_address(address).is_loopback}
+        loopback = {address for address in announced if ip_address(address).is_loopback}
+
+        for where in (routable, loopback):
+            for entry in entries:
+                if entry.data.get(CONF_PORT) != discovery_info.port:
+                    continue
+                host = entry.data.get(CONF_HOST)
+                if not isinstance(host, str):
+                    continue
+                # Compared as an address where it is one, so that
+                # `2001:DB8::1` and `2001:db8::1` are the same host rather than
+                # two strings that differ.
+                try:
+                    if str(ip_address(host)) in where:
+                        return entry
+                except ValueError:
+                    # Not an address, so it can only be the announced hostname
+                    # -- and only if there is one to be.
+                    if where is routable and hostname and host.rstrip(".").casefold() == hostname:
+                        return entry
+        return None
 
     async def async_step_user(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
         """Take a host and port and check a station is listening there."""
