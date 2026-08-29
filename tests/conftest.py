@@ -60,6 +60,13 @@ class FakeStation:
         self.pairing_window_open = True
         self.has_pairing_authority = True
         self.tokens: set[str] = set()
+        # What the last pair request called itself -- the station's Pairing
+        # list shows this, so AHA-32 is about getting it right.
+        self.paired_names: list[str] = []
+
+        # The bodies of every `POST /v1/alerts`, so a test can prove what the
+        # integration *sent* rather than what this fake defaulted for it.
+        self.created: list[dict[str, Any]] = []
         # Fixed rather than random so a test can assert the config entry's
         # unique id is the `source_id` and not something else that looks like one.
         self.source_id = "src_e49f9fe6-f09"
@@ -162,6 +169,7 @@ class FakeStation:
             # these three refusals from each other.
             return web.json_response({"error": "forbidden"}, status=403)
 
+        self.paired_names.append(str(body.get("name")))
         token = f"lat_{secrets.token_hex(21)}"
         self.tokens.add(token)
         # `id`, not `source_id`; `kind` comes back as "source" whatever was sent.
@@ -195,6 +203,7 @@ class FakeStation:
         if not self._authorized(request):
             return self._unauthorized()
         body = await request.json()
+        self.created.append(dict(body))
 
         dedup_key = body.get("dedup_key")
         if dedup_key is not None:
