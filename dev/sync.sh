@@ -17,8 +17,9 @@ echo "synced -> $HA_HOST:$HA_SRC"
 
 if [ "$restart" = 1 ]; then
   ssh "$HA_HOST" "docker restart $HA_CONTAINER >/dev/null"
-  # Wait for the API to answer rather than guessing: HA takes ~30-45s here and
-  # a log tail started too early shows the previous run's tail, not this one.
-  ssh "$HA_HOST" "until curl -sS -o /dev/null -m 3 http://localhost:8123/ 2>/dev/null; do sleep 3; done"
+  # Wait for the API to answer rather than guessing: it comes back in well
+  # under a minute, but a log tail started too early shows the previous run's
+  # tail instead of this one.
+  wait_for_ha
   echo "restarted, $HA_URL is answering"
 fi

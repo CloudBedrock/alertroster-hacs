@@ -38,7 +38,7 @@ mypy --strict custom_components/alertroster
 Home Assistant for this project runs on **ubuntu-dev**, not locally — see `dev/README.md`.
 
 ```sh
-./dev/sync.sh       # push the integration to the rig and restart HA (~10s)
+./dev/sync.sh       # push the integration to the rig and restart HA (<15s)
 ./dev/logs.sh       # follow the log, filtered to this integration
 ./dev/stations.sh   # stations on the LAN, and whether they answer
 ```
