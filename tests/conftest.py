@@ -79,13 +79,27 @@ class FakeStation:
         # -- and, for the token tests, on what was not.
         self.requests: list[tuple[str, str]] = []
 
+        # The reply spells the source id `id`; the protocol document says
+        # `source_id`. A test flips this to prove the client takes either.
+        self.id_field = "id"
+
+        # Wrong codes, so the fake can close its own window on the third the
+        # way the real station does -- otherwise a test of that behaviour only
+        # asserts the config flow's counter against itself.
+        self.wrong_codes = 0
+
+        # Answer the next authenticated request with a non-JSON body, which is
+        # the one thing `_decode` exists to tolerate.
+        self.send_garbage = False
+
         self.host = "127.0.0.1"
         self.port = 0
+        self._server: TestServer | None = None
+        self.app = self._build_app()
 
     # -- wiring ---------------------------------------------------------
 
-    @property
-    def app(self) -> web.Application:
+    def _build_app(self) -> web.Application:
         """The application, with one route per path the client knows."""
         app = web.Application(middlewares=[self._record])
         app.router.add_get("/v1/discover", self._discover)
@@ -132,19 +146,27 @@ class FakeStation:
     async def _pair(self, request: web.Request) -> web.Response:
         """§6.1. Every refusal is the same `403` with no body detail."""
         body = await request.json()
-        refused = (
-            not self.has_pairing_authority
-            or not self.pairing_window_open
-            or body.get("code") != self.valid_code
-        )
+        wrong_code = body.get("code") != self.valid_code
+        refused = not self.has_pairing_authority or not self.pairing_window_open or wrong_code
         if refused:
+            if wrong_code:
+                self.wrong_codes += 1
+                if self.wrong_codes >= 3:
+                    # Three wrong codes close the window, and it stays closed
+                    # until someone opens it on the station again.
+                    self.pairing_window_open = False
+            # A JSON body, because §8 has the station answer JSON on every path
+            # -- confirmed against a real one, which sends
+            # `{"error": "invalid_credentials"}` on a 401. What the document
+            # means by "no body detail" is that nothing in it distinguishes
+            # these three refusals from each other.
             return web.json_response({"error": "forbidden"}, status=403)
 
         token = f"lat_{secrets.token_hex(21)}"
         self.tokens.add(token)
         # `id`, not `source_id`; `kind` comes back as "source" whatever was sent.
         return web.json_response(
-            {"token": token, "id": self.source_id, "kind": "source"},
+            {"token": token, self.id_field: self.source_id, "kind": "source"},
             status=201,
         )
 
@@ -152,6 +174,8 @@ class FakeStation:
         """§4.3. Open alerts only, newest first."""
         if not self._authorized(request):
             return self._unauthorized()
+        if self.send_garbage:
+            return web.Response(body=b"<html>not json</html>", content_type="text/html", status=500)
         open_alerts = [
             a for a in self.alerts.values() if a["status"] in ("triggered", "acknowledged")
         ]
@@ -215,8 +239,15 @@ class FakeStation:
         await socket.prepare(request)
         self.sockets.append(socket)
         await socket.send_json({"event": "snapshot", "alerts": list(self.alerts.values())})
-        async for _message in socket:
-            pass
+        try:
+            async for _message in socket:
+                pass
+        finally:
+            # Otherwise a later `push()` writes to a socket the client has
+            # already gone from, and the fake raises instead of the test failing
+            # on whatever it was actually checking.
+            if socket in self.sockets:
+                self.sockets.remove(socket)
         return socket
 
     # -- what a test drives it with -------------------------------------
@@ -231,6 +262,12 @@ class FakeStation:
         for socket in list(self.sockets):
             await socket.close()
         self.sockets.clear()
+
+    async def stop(self) -> None:
+        """Take the station off the air, as a station being restarted does."""
+        if self._server is not None:
+            await self._server.close()
+            self._server = None
 
     def issue_token(self) -> str:
         """Mint a token without going through pairing, for authed-path tests."""
@@ -251,6 +288,7 @@ async def station(socket_enabled: None) -> AsyncIterator[FakeStation]:
     """
     fake = FakeStation()
     server = TestServer(fake.app)
+    fake._server = server
     await server.start_server()
     fake.host = server.host or "127.0.0.1"
     fake.port = server.port or 0
