@@ -185,7 +185,7 @@ async def test_connecting_notifies_listeners(hass: HomeAssistant, station: FakeS
     remove = connection.async_add_listener(lambda: seen.append(connection.connected))
 
     await station.drop_sockets()
-    await _until(lambda: seen and seen[-1] is False, "the disconnect to reach the listener")
+    await _until(lambda: bool(seen) and seen[-1] is False, "the disconnect to reach the listener")
     remove()
 
     assert False in seen

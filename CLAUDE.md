@@ -37,6 +37,7 @@ pytest                                   # all tests
 pytest tests/test_config_flow.py::test_x  # one test
 ruff check . && ruff format .
 mypy --strict custom_components/alertroster
+mypy tests                               # CI runs this too, and it is not --strict
 ```
 
 `pyproject.toml` sets `asyncio_mode = "auto"`, so async tests need no marker. CI
