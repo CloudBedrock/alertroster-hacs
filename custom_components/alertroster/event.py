@@ -50,13 +50,18 @@ class AlertRosterAlertEvent(AlertRosterEntity, EventEntity):
     """The last transition the station reported for this source's alerts."""
 
     _attr_translation_key = "alert"
-    # A list off the mapping, so the picker offers them in the order §3.4's
-    # table lists them rather than in whatever order a set iterates.
-    _attr_event_types = list(ENTITY_EVENT_TYPES.values())
 
     def __init__(self, entry: AlertRosterConfigEntry, connection: StationConnection) -> None:
         """Create the entity for `entry`'s station."""
         super().__init__(entry, connection, "alert")
+        # A list off the mapping, so the picker offers them in the order §3.4's
+        # table lists them rather than in whatever order a set iterates -- and
+        # a fresh one per entity, because `capability_attributes` hands this
+        # object straight to the state machine. A class attribute would be the
+        # single list every station's entity exposes, and a template calling
+        # `state_attr(..., 'event_types').append(...)` would edit all of them:
+        # the same aliasing the `alert` attribute is deep-copied to prevent.
+        self._attr_event_types = list(ENTITY_EVENT_TYPES.values())
 
     async def async_added_to_hass(self) -> None:
         """Also follow the transitions, not only the state they leave behind.
