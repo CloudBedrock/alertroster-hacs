@@ -13,9 +13,16 @@ alerts on it from automations, and fires HA events when an alert is acknowledged
 M0–M6 milestone table. Read it before adding anything — it records decisions (and non-goals)
 that are not visible in the code.
 
-**Current state: M0 skeleton.** `PLATFORMS` is empty, `AlertRosterConfigFlow` has no steps, and
-there is no client, no `services.yaml`, and no entity platforms yet. The strings files already
-describe the intended config-flow steps.
+**Current state: partway through M1.** `api.py` is the wire client and `config_flow.py` pairs
+manually — `user` (host/port + reachability probe) then `pair` (8-digit code → source token).
+Still missing: zeroconf discovery (AHA-6), reauth on 401 (AHA-9), the events task (AHA-16),
+`services.yaml` and the services, and every entity platform, so `PLATFORMS` is still empty.
+
+Tests run against a fake station that is a **real `aiohttp` server** on a loopback port
+(`tests/conftest.py`), not a mocked client — `pytest-socket` blocks everything else, which is
+what enforces the no-network rule below. `requirements_dev.txt` is pinned on purpose:
+`pytest-homeassistant-custom-component` pins an exact Home Assistant in turn, and the pinned one
+matches the rig.
 
 ## Commands
 

@@ -23,3 +23,29 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: home-assistant/actions/hassfest@master
+
+  tests:
+    name: Tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          # Home Assistant 2026.8.3 requires >=3.14.2; an older runner cannot
+          # even install it.
+          python-version: "3.14"
+      - run: pip install -r requirements_dev.txt
+      - name: ruff check
+        run: ruff check .
+      - name: ruff format
+        run: ruff format --check .
+      - name: mypy
+        run: mypy --strict custom_components/alertroster
+      - name: mypy (tests)
+        # Not --strict: the point is to catch fixture-signature drift and wrong
+        # annotations in the suite. It earned its place immediately -- it found
+        # `events()` typed as an AsyncIterator, which has no `aclose()`, while
+        # its own docstring tells callers to wrap it in `aclosing()`.
+        run: mypy tests
+      - name: pytest
+        run: pytest
