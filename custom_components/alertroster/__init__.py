@@ -1,9 +1,11 @@
 """AlertRoster: raise alerts on a local receiver station, and react when nobody answers.
 
-Entry setup builds the one client the entry owns, hands it to the services, and
-starts the connection that holds the station's events socket open. The entities
-that will listen to that connection are the M4 issues, which is why `PLATFORMS`
-is still empty.
+Entry setup builds the one client the entry owns, hands it to the services,
+puts the station's transitions on the Home Assistant bus, and starts the
+connection that holds the station's events socket open. The entities that will
+listen to that connection are the M4 issues, which is why `PLATFORMS` is still
+empty -- the bus events do not wait for them, and an automation can trigger on
+`alertroster_unacknowledged` today.
 
 Setup does not wait for the station to answer -- `connection.py` explains why
 that is a decision rather than an oversight.
@@ -23,6 +25,7 @@ from homeassistant.helpers.typing import ConfigType
 from .api import AlertRosterClient
 from .connection import StationConnection
 from .const import DOMAIN
+from .events import async_setup_station_events
 from .services import async_setup_services
 
 PLATFORMS: list[str] = []
@@ -72,6 +75,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: AlertRosterConfigEntry) 
     )
     connection = StationConnection(hass, entry, client)
     entry.runtime_data = AlertRosterData(client=client, connection=connection)
+
+    # Before the socket is started: a transition that arrived in the gap would
+    # otherwise be lost, and §4.6 never replays one. The seed that follows a
+    # reconnect can recover the *state* an alert is in, but never the fact that
+    # it expired, which is the one thing automations are here for.
+    entry.async_on_unload(async_setup_station_events(hass, entry, connection))
 
     # Platforms first: an entity that is added after the connection has already
     # seeded still reads the current state when it is added, but one added

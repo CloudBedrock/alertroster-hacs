@@ -80,7 +80,8 @@ action:
 ```
 
 Also fired: `alertroster_triggered`, `alertroster_acknowledged`, `alertroster_resolved`. Each
-carries the whole alert as `alert`.
+carries the whole alert as `alert` and the station's name as `station`, so an automation watching
+two stations can tell which one rang: `{{ trigger.event.data.station }}`.
 
 ### Entities
 
