@@ -25,7 +25,7 @@ from __future__ import annotations
 
 import json
 import logging
-from collections.abc import AsyncIterator
+from collections.abc import AsyncGenerator
 from dataclasses import dataclass, field
 from typing import Any, Self
 
@@ -445,7 +445,7 @@ class AlertRosterClient:
         alert = body.get("alert")
         return alert if isinstance(alert, dict) else {}
 
-    async def events(self) -> AsyncIterator[StationEvent]:
+    async def events(self) -> AsyncGenerator[StationEvent]:
         """Yield transitions from the station's events socket (§4.6).
 
         The socket is authenticated with the same Bearer header as every other
