@@ -9,9 +9,12 @@ ZEROCONF_TYPE = "_alertroster-receiver._tcp.local."
 CONF_SOURCE_ID = "source_id"
 CONF_STATION_NAME = "station_name"
 
-# What the station's Pairing list calls this source (protocol §6.1). A literal
-# for now; whether it should be the HA instance name instead is AHA-32.
-PAIR_NAME = "Home Assistant"
+# What the station's Pairing list calls this source (protocol §6.1). AHA-32
+# settled this: the request sends `hass.config.location_name`, so two Home
+# Assistants paired to one station are told apart in its Pairing list instead
+# of both showing as "Home Assistant". This is only the fallback for an
+# instance whose name is somehow empty.
+PAIR_NAME_FALLBACK = "Home Assistant"
 PAIR_KIND = "homeassistant"
 
 # The station closes its pairing window after this many wrong codes, so the
