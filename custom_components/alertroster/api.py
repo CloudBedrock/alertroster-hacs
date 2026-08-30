@@ -76,9 +76,11 @@ class InvalidCode(AlertRosterError):
     all are the *same* `403` with no body detail, deliberately, so that a
     guesser learns nothing (`localapi.cpp`, `LocalApi::pair`). This client
     therefore cannot tell the user which it was from the pair response alone.
-    Distinguishing them needs the unauthenticated `GET /v1/discover` carrying
-    `pairing_window_open` that REQUIREMENTS.md §5 item 1 asks the station for;
-    until that ships, `PairingWindowClosed` is unreachable from `pair()`.
+    Distinguishing them needs `pairing_window_open` off the unauthenticated
+    `GET /v1/discover` (§4.1). The station answers that route now, but the
+    config flow does not consult the field before pairing, so
+    `PairingWindowClosed` is still unreachable from `pair()` -- a gap in this
+    client, no longer a gap in the station.
     """
 
 
@@ -144,12 +146,11 @@ class PairResult:
 class StationInfo:
     """What an unauthenticated probe could learn about a station.
 
-    Every field is optional because today it learns nothing: `GET /v1/discover`
-    is REQUIREMENTS.md §5 item 1, a change requested of the station and not yet
-    shipped, so a reachable station answers the probe with a `404`. The shape is
-    here now so the config flow can read `pairing_window_open` the day it
-    appears rather than being reshaped around it -- `None` means "the station
-    did not say", which is not the same as `False`.
+    Every field is optional because the station may say nothing at all:
+    `GET /v1/discover` (§4.1) is newer than the integration, and a station built
+    before it answers the probe with a `404`. `None` therefore means "this
+    station did not say", which is not the same as `False` -- and is why the
+    device carries no version rather than a guessed one.
     """
 
     name: str | None = None

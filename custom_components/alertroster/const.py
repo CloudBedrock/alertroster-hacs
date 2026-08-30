@@ -25,6 +25,13 @@ ZEROCONF_NAME_KEY = "name"
 # `homeassistant.const`; these two have no standard spelling.
 CONF_SOURCE_ID = "source_id"
 CONF_STATION_NAME = "station_name"
+# The station's software version, as §4.1's probe last reported it. Stored on
+# the entry rather than read at runtime: it changes only when the station is
+# upgraded, and the flow already talks to `GET /v1/discover` at pairing and on
+# every re-announcement of a discovered station, so a background request per
+# reconnect would buy nothing but load. Absent for a station too old to answer
+# that probe, which is a device page with no version rather than a wrong one.
+CONF_STATION_VERSION = "station_version"
 
 # What the station's Pairing list calls this source (protocol §6.1). AHA-32
 # settled this: the request sends `hass.config.location_name`, so two Home

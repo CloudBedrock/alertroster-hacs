@@ -115,7 +115,10 @@ studio"): `has_entity_name` builds every entity id below from the device name, a
 would spell them `event.alertroster_station_studio_alert`. The brand is on the device page as its
 manufacturer instead. The device is identified by the config entry, not by `source_id` — §6.2
 remints the source row on every pairing, so a device keyed on it would be abandoned and rebuilt
-(with new entity ids) the first time a revoked token was re-paired.
+(with new entity ids) the first time a revoked token was re-paired. Its software version is
+whatever §4.1's probe last reported — captured at pairing, on re-pairing, and on the
+re-announcement of a discovered station, and absent rather than guessed for a station that does
+not answer that probe.
 
 | Entity | Type | Meaning |
 |---|---|---|
@@ -192,7 +195,12 @@ Tracked there as issues; none block installing as a custom repository, all make 
 
 1. **Unauthenticated `GET /v1/discover`** on the LAN listener returning
    `{name, version, pairing_window_open}` so the config flow can tell the user the window is
-   not open *before* asking for a code. (Today `/v1/status` is surface-only.)
+   not open *before* asking for a code, and so the device page can show which build the station
+   is running. Implemented in `alertroster-desktop` (`core/localapi.cpp`) and documented in
+   `LOCAL_ACK_PROTOCOL.md` §4.1; a station older than that answers `404`, which the integration
+   reads as "said nothing" — the name falls back to the address and the device carries no
+   version. `/v1/status` stays authenticated: its counts describe the other principals, and §6.2
+   scopes a source to its own.
 2. **A token may revoke itself** (`DELETE /v1/sources/self` or `DELETE /v1/sources/:own_id`
    with a source token) so removing the integration in HA removes the row on the station.
 3. **Pairing dialog hint**: "Enter this code in Home Assistant → Settings → Devices & services".
