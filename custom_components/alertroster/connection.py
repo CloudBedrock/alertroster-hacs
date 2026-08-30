@@ -162,6 +162,34 @@ class StationConnection:
         """
         return len(self._alerts)
 
+    def diagnostics(self) -> dict[str, Any]:
+        """Describe this connection for a diagnostics download (AHA-26).
+
+        The connection describes itself rather than letting `diagnostics.py`
+        reach in, because the two signals worth having in a bug report --
+        the consecutive failure count and whether the task is still alive --
+        are private, and reaching for them from another module would make
+        them public by accident.
+
+        `consecutive_failures` is the backoff's position, so it says how hard
+        this has been retrying, not merely that it is down; a socket that
+        held for `BACKOFF_MAX` resets it, which is why "connected, failures
+        4" is a real and useful state -- it means recently flapping.
+
+        Nothing here is the token, and nothing here is a live object: the
+        diagnostics serializer renders anything it cannot encode with
+        `repr()` and does not complain, so a stray object would be a silent
+        leak rather than an error.
+        """
+        held_for = self._held_for()
+        return {
+            "connected": self._connected,
+            "open_alert_count": len(self._alerts),
+            "consecutive_failures": self._failures,
+            "connected_for_seconds": None if held_for is None else round(held_for, 1),
+            "task_running": self._task is not None and not self._task.done(),
+        }
+
     @callback
     def async_add_listener(self, update: CALLBACK_TYPE) -> CALLBACK_TYPE:
         """Register `update`, and return the callable that unregisters it."""
