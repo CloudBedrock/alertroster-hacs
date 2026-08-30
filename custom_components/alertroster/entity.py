@@ -51,6 +51,10 @@ class AlertRosterEntity(Entity):
         """Attach this entity to `entry`'s station, under `key`."""
         self._entry = entry
         self._connection = connection
+        # Guarded like the config flow guards it (`async_step_reauth`): this is
+        # whatever is in stored entry data, and the device registry coerces a
+        # non-string through a deprecated path rather than ignoring it.
+        version = entry.data.get(CONF_STATION_VERSION)
         self._attr_unique_id = f"{entry.entry_id}_{key}"
         self._attr_device_info = DeviceInfo(
             identifiers={(DOMAIN, entry.entry_id)},
@@ -68,7 +72,7 @@ class AlertRosterEntity(Entity):
             # the wire: `const.py` says why it is stored there. `None` on a
             # station too old to answer that probe, which leaves the device
             # page with no version rather than a guessed one.
-            sw_version=entry.data.get(CONF_STATION_VERSION),
+            sw_version=version if isinstance(version, str) else None,
         )
 
     @property
