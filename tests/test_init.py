@@ -92,9 +92,13 @@ async def test_a_station_that_revoked_first_is_not_a_warning(
     entry = await _setup(hass, station)
     station.revoked = True
 
-    with caplog.at_level(logging.WARNING):
+    with caplog.at_level(logging.DEBUG):
         await _remove(hass, entry)
 
+    # Attempted, not skipped: "no warning" on its own would still be true of a
+    # removal that never called the station at all.
+    assert ("DELETE", "/v1/sources/self") in station.requests
+    assert "had already revoked this pairing" in caplog.text
     assert hass.config_entries.async_entries(DOMAIN) == []
     assert "Pairing screen" not in caplog.text
 
