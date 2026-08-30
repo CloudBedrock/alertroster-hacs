@@ -228,11 +228,15 @@ async def test_a_duration_is_only_reported_while_connected(
 ) -> None:
     """`connected_for_seconds` describes a live socket, or says nothing.
 
-    Set up by hand because the run loop cannot produce this state today: every
-    path out of a socket clears `_connected_at` through the backoff, and the
-    one branch that skips the backoff -- a revoked token -- is only reached
-    from the upgrade (`api.py` raises `InvalidAuth` from the handshake), which
-    is before the socket ever came up.
+    Set up by hand because the run loop cannot produce this state today. The
+    only exit that skips `_next_backoff` -- and so leaves `_connected_at`
+    standing -- is the `InvalidAuth` branch, and both places that raise
+    `InvalidAuth` run when it is already `None`: the WebSocket handshake, which
+    is before the socket came up, and any HTTP `401`, which reaches this loop
+    through the seed at the top of an iteration, after the backoff has cleared
+    it. Move the seed, or add a third `401` path, and the stale duration comes
+    back -- which is why the gate is here rather than an argument that it
+    cannot happen.
 
     Pinned anyway. A number sitting next to `connected: false` reads as a live
     connection, and whoever opens the file cannot tell that it is stale.
