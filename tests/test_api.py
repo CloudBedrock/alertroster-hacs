@@ -152,6 +152,51 @@ async def test_pair_never_puts_the_token_in_a_log_line(
     assert result.token not in repr(_client(session, station, result.token))
 
 
+# -- unpairing ------------------------------------------------------------
+
+
+async def test_revoke_self_unpairs_and_the_row_goes(
+    session: aiohttp.ClientSession, station: FakeStation
+) -> None:
+    """§6.4: the station drops the row and stops honouring the token."""
+    client = _client(session, station, station.issue_token())
+
+    await client.revoke_self()
+
+    assert ("DELETE", "/v1/sources/self") in station.requests
+    assert not station.paired
+    with pytest.raises(InvalidAuth):
+        await client.list_alerts()
+
+
+async def test_revoke_self_treats_a_missing_row_as_done(
+    session: aiohttp.ClientSession, station: FakeStation
+) -> None:
+    """§6.4's `404` is the state the call wanted, so it is not an error.
+
+    A retried removal, or one against a station where somebody already deleted
+    the row by hand, must not leave the entry undeletable.
+    """
+    token = station.issue_token()
+    station.paired = False
+
+    await _client(session, station, token).revoke_self()
+
+
+async def test_revoke_self_still_raises_on_a_real_refusal(
+    session: aiohttp.ClientSession, station: FakeStation
+) -> None:
+    """Only `404` is swallowed; anything else the caller has to hear about."""
+    client = _client(session, station, station.issue_token())
+    station.revoke_status = 403
+
+    with pytest.raises(StationError) as caught:
+        await client.revoke_self()
+
+    assert caught.value.status == 403
+    assert station.paired
+
+
 # -- alerts ---------------------------------------------------------------
 
 
