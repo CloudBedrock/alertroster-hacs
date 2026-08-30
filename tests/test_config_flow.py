@@ -32,6 +32,7 @@ from custom_components.alertroster.config_flow import (
 from custom_components.alertroster.const import (
     CONF_SOURCE_ID,
     CONF_STATION_NAME,
+    CONF_STATION_VERSION,
     DEFAULT_PORT,
     DOMAIN,
     ZEROCONF_TYPE,
@@ -116,6 +117,30 @@ async def test_manual_host_and_code_creates_an_entry(
     # Today's station cannot tell us its name; the entry is titled by address.
     assert result["data"][CONF_STATION_NAME] is None
     assert result["title"] == station.host
+
+
+async def test_the_station_version_is_stored_at_pairing(
+    hass: HomeAssistant, station: FakeStation
+) -> None:
+    """AHA-20: what the device page shows as the station's software version."""
+    station.discover_status = 200
+
+    result = await _start(hass)
+    result = await _submit(hass, result["flow_id"], host=station.host, port=station.port)
+    result = await _submit(hass, result["flow_id"], code=station.valid_code)
+
+    assert result["data"][CONF_STATION_VERSION] == station.version
+
+
+async def test_a_station_too_old_to_answer_the_probe_has_no_version(
+    hass: HomeAssistant, station: FakeStation
+) -> None:
+    """No version rather than a guessed one: the probe is a 404 on that station."""
+    result = await _start(hass)
+    result = await _submit(hass, result["flow_id"], host=station.host, port=station.port)
+    result = await _submit(hass, result["flow_id"], code=station.valid_code)
+
+    assert result["data"][CONF_STATION_VERSION] is None
 
 
 async def test_the_port_defaults_to_4747(hass: HomeAssistant) -> None:
@@ -418,6 +443,40 @@ async def test_reauth_replaces_the_token_on_the_existing_entry(
     assert entry.data[CONF_TOKEN] in station.tokens
 
 
+async def test_reauth_refreshes_the_station_version(
+    hass: HomeAssistant, station: FakeStation
+) -> None:
+    """Someone re-pairing is standing at the station, which may have been upgraded."""
+    entry = _paired(hass, station)
+    hass.config_entries.async_update_entry(
+        entry, data={**entry.data, CONF_STATION_VERSION: "1.0.0"}
+    )
+    station.discover_status = 200
+    station.version = "2.0.0"
+
+    result = await _start_reauth(hass, entry)
+    result = await _submit(hass, result["flow_id"], code=station.valid_code)
+
+    assert result["reason"] == "reauth_successful"
+    assert entry.data[CONF_STATION_VERSION] == "2.0.0"
+
+
+async def test_reauth_against_a_station_with_no_probe_keeps_the_stored_version(
+    hass: HomeAssistant, station: FakeStation
+) -> None:
+    """A 404 says nothing, and nothing is not "the version is gone"."""
+    entry = _paired(hass, station)
+    hass.config_entries.async_update_entry(
+        entry, data={**entry.data, CONF_STATION_VERSION: "1.0.0"}
+    )
+
+    result = await _start_reauth(hass, entry)
+    result = await _submit(hass, result["flow_id"], code=station.valid_code)
+
+    assert result["reason"] == "reauth_successful"
+    assert entry.data[CONF_STATION_VERSION] == "1.0.0"
+
+
 async def test_reauth_never_asks_for_the_address_again(
     hass: HomeAssistant, station: FakeStation
 ) -> None:
@@ -643,6 +702,42 @@ async def test_a_station_added_by_hand_is_matched_by_address_and_gains_its_name(
     assert result["type"] is FlowResultType.ABORT
     assert result["reason"] == "already_configured"
     assert entry.data[CONF_STATION_NAME] == "studio"
+
+
+async def test_an_upgraded_station_says_so_on_its_next_announcement(
+    hass: HomeAssistant, station: FakeStation
+) -> None:
+    """AHA-20: the version stays true without anything polling for it.
+
+    The announcement of a station that is already paired is otherwise ignored
+    (§3.1), and the probe behind it is one this flow makes anyway to decide
+    whether the stored address still answers -- so an upgrade shows up on the
+    device page for free, on the station's own re-announcement timer.
+    """
+    station.discover_status = 200
+    station.version = "2.0.0"
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        title="studio",
+        unique_id=station.source_id,
+        data={
+            CONF_HOST: station.host,
+            CONF_PORT: station.port,
+            CONF_TOKEN: "lat_still_good",
+            CONF_SOURCE_ID: station.source_id,
+            CONF_STATION_NAME: "studio",
+            CONF_STATION_VERSION: "1.0.0",
+        },
+    )
+    entry.add_to_hass(hass)
+
+    result = await _discover(hass, _announcement(station.host, station.port))
+
+    assert result["type"] is FlowResultType.ABORT
+    assert result["reason"] == "already_configured"
+    assert entry.data[CONF_STATION_VERSION] == "2.0.0"
+    # Nothing else moved: the station is where it always was.
+    assert entry.data[CONF_HOST] == station.host
 
 
 @pytest.mark.parametrize(
