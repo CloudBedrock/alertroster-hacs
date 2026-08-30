@@ -118,6 +118,14 @@ has to still be there during it. A stale board is worse than a blank one.
 A source only sees its own alerts, so these describe what Home Assistant raised — not everything
 the station is paging about.
 
+## Unpair
+
+Deleting the integration in Home Assistant (Settings → Devices & services → ⋮ → **Delete**) tells
+the station to revoke the token, so the row leaves its Pairing list too. If the station was off at
+that moment the entry is still deleted — nothing traps you in an integration you cannot remove —
+and the row is left behind. Clear it on the station: **Service → Pairing**, find *Home Assistant*,
+revoke.
+
 ## Development
 
 ```sh
