@@ -122,17 +122,45 @@ def _scrubbed(payload: dict[str, Any], token: str | None) -> dict[str, Any]:
     in.
 
     `ExtendedJSONEncoder` is the encoder Home Assistant serves diagnostics
-    with, and it never raises: a value it cannot encode becomes a `repr`
-    string, which this then scrubs like any other.
+    with, and it does not raise on a *value* it cannot encode -- that becomes a
+    `repr` string, which this scrubs like any other. It can still raise on a
+    payload that is not JSON-shaped at all: a non-primitive dict key, or a
+    cycle. Neither is reachable from what is assembled above, and if one ever
+    is, the whole payload is withheld rather than served unscrubbed. A file
+    that says it could not be produced is recoverable; a leaked credential is
+    not.
 
     Substring rather than equality, because a token pasted into a sentence is
     still a leaked token.
     """
-    encoded = json.dumps(payload, cls=ExtendedJSONEncoder)
-    if token:
-        # The token as it appears *inside* JSON, which is the same as the token
-        # itself for the `lat_` + hex the station issues, and not the same if a
-        # future one carries a character JSON escapes.
-        encoded = encoded.replace(json.dumps(token)[1:-1], REDACTED)
+    try:
+        encoded = json.dumps(payload, cls=ExtendedJSONEncoder)
+    except (TypeError, ValueError):
+        return {"error": "the diagnostics payload could not be serialized, so it was withheld"}
+
+    for needle in _needles(token):
+        encoded = encoded.replace(needle, REDACTED)
     decoded: dict[str, Any] = json.loads(encoded)
     return decoded
+
+
+def _needles(token: str | None) -> list[str]:
+    """Every spelling of the token that could appear in the encoded text.
+
+    Two, because the payload is not all JSON strings: the encoder renders an
+    object it cannot encode with `repr`, and `repr` escapes a control
+    character *before* `json.dumps` escapes the backslash. A token holding one
+    would read `lat_\\x01z` there and `lat_\u0001z` in a plain string, and one
+    needle would miss the other. Non-ASCII needs no third: both sides encode
+    with `ensure_ascii`, so `é` is `\u00e9` in each.
+
+    The `lat_` + hex the station issues today can be neither. This is about
+    what the *next* token format might be, which is not this repo's to decide.
+    """
+    if not token:
+        return []
+    inside_json = json.dumps(token)[1:-1]
+    # `repr` puts quotes round it; the needle is what lies between them, then
+    # escaped the way the encoder will have escaped it.
+    inside_repr = json.dumps(repr(token)[1:-1])[1:-1]
+    return [inside_json] if inside_repr == inside_json else [inside_json, inside_repr]
