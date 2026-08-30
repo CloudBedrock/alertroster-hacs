@@ -193,6 +193,56 @@ async def test_a_station_with_no_version_gets_a_device_without_one(
     assert device.sw_version is None
 
 
+async def test_an_entry_paired_before_the_version_existed_still_loads(
+    hass: HomeAssistant, station: FakeStation
+) -> None:
+    """Stored data with no version *key* at all, which is what upgrades look like.
+
+    Every entry paired before AHA-20 has no `station_version` in its data, and
+    nothing migrates them -- so the read has to tolerate the key being absent,
+    not merely present and `None`. Written without `_setup`, which always
+    writes the key and so cannot reach this case.
+    """
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        title="studio",
+        unique_id=station.source_id,
+        data={
+            CONF_HOST: station.host,
+            CONF_PORT: station.port,
+            CONF_TOKEN: station.issue_token(),
+            CONF_SOURCE_ID: station.source_id,
+            CONF_STATION_NAME: None,
+        },
+    )
+    entry.add_to_hass(hass)
+    assert await hass.config_entries.async_setup(entry.entry_id)
+    await hass.async_block_till_done()
+    assert CONF_STATION_VERSION not in entry.data
+
+    device = dr.async_get(hass).async_get_device(identifiers={(DOMAIN, entry.entry_id)})
+    assert device is not None
+    assert device.sw_version is None
+    assert _state(hass, _CONNECTED) is not None
+
+
+async def test_a_version_that_is_not_a_string_is_ignored(
+    hass: HomeAssistant, station: FakeStation
+) -> None:
+    """Stored data is only as good as what wrote it.
+
+    The config flow guards this value with `isinstance` on the way in, so the
+    read guards it the same way: the device registry does not reject a
+    non-string, it coerces one through a deprecated path, and a version of `2`
+    on a device page is worse than none.
+    """
+    entry = await _setup(hass, station, version=2)  # type: ignore[arg-type]
+
+    device = dr.async_get(hass).async_get_device(identifiers={(DOMAIN, entry.entry_id)})
+    assert device is not None
+    assert device.sw_version is None
+
+
 async def test_the_device_classes_are_the_ones_the_ui_renders(
     hass: HomeAssistant, station: FakeStation
 ) -> None:

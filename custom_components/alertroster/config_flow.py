@@ -158,10 +158,10 @@ class AlertRosterConfigFlow(ConfigFlow, domain=DOMAIN):
     def _station_label(self) -> str:
         """Name the station in the UI, falling back to its address.
 
-        The station only tells us its name once it ships `GET /v1/discover`
-        (REQUIREMENTS.md §5 item 1), so until then the pair step's "Pair with
-        {name}" title reads as the host the user just typed -- which is still
-        the thing they are looking at.
+        A station too old for `GET /v1/discover` (§4.1) never tells us its
+        name, and a manual flow has no announcement to read one off, so the
+        pair step's "Pair with {name}" title falls back to the host the user
+        just typed -- which is still the thing they are looking at.
         """
         return self._station.name or self._host
 
@@ -412,8 +412,17 @@ class AlertRosterConfigFlow(ConfigFlow, domain=DOMAIN):
             probed = await AlertRosterClient(
                 async_get_clientsession(self.hass), self._host, self._port
             ).probe()
-        except CannotConnect:
-            pass
+        except CannotConnect as failure:
+            # Every other failure in this module says so; without this, a
+            # reauth form that took the request timeout to appear leaves
+            # nothing in the log explaining the wait. Host and port only --
+            # §6 keeps the token out of every log line.
+            _LOGGER.debug(
+                "Could not read the version of the AlertRoster station at %s:%s: %s",
+                self._host,
+                self._port,
+                failure,
+            )
         else:
             if probed.version is not None:
                 self._station = StationInfo(name=self._station.name, version=probed.version)
