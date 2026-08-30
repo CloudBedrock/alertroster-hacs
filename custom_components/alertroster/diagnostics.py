@@ -18,35 +18,45 @@ is deliberate:
    default has to be "not shared".
 2. **`async_redact_data`.** Catches a `token` key anywhere in the payload,
    however deeply nested -- including inside an alert the station sent.
-3. **A value sweep.** The one case the first two cannot see: the token turning
-   up *as a value* under an innocent key. Nothing produces that today. It is
-   here because "never" is the requirement, and because the thing that would
-   produce it -- an alert whose `detail` somebody pasted a token into, a field
-   a newer station echoes back -- is not something this integration controls.
+3. **A sweep of the serialized payload.** The cases the first two cannot see:
+   the token as a *value* under an innocent key (an alert's `detail` is
+   whatever an automation wrote), as a dict *key*, or inside a container
+   neither layer walks. Layer 2 walks only mappings and lists; a tuple, a set,
+   a `MappingProxyType` -- which is exactly what `entry.data` is -- or an
+   object rendered by its `repr` would pass both of the first two layers
+   untouched.
+
+   So this layer does not walk the payload at all. It encodes it with the
+   same encoder Home Assistant is about to use, scrubs the *text*, and parses
+   it back. Whatever the encoder can emit, this has already seen.
 
 Layers 2 and 3 are unreachable as the code stands. That is the point: they are
-what keeps the rule true after somebody widens layer 1.
+what keeps the rule true after somebody widens layer 1 -- and the widening to
+expect is `entry.data` or `entry.as_dict()`, both of which carry the token
+under a `MappingProxyType` that a hand-rolled walk would step straight past.
 
-One trap worth naming. Home Assistant's diagnostics serializer renders a value
-it cannot encode with `repr()` rather than raising (`helpers/json.py`), so a
-live object placed in this payload would not fail the request -- it would
-quietly print itself. Everything returned here is a scalar, a string, or a
-plain dict built from them.
+The round trip earns its keep twice over. Home Assistant's serializer renders a
+value it cannot encode with `repr()` rather than raising (`helpers/json.py`),
+so a live object placed in this payload would not fail the request -- it would
+quietly print itself. After the round trip there are no live objects left to
+print: what this returns is what the encoder made of them, already scrubbed.
 """
 
 from __future__ import annotations
 
+import json
 from typing import TYPE_CHECKING, Any
 
 from homeassistant.components.diagnostics import REDACTED, async_redact_data
 from homeassistant.const import CONF_HOST, CONF_PORT, CONF_TOKEN
+from homeassistant.helpers.json import ExtendedJSONEncoder
 
 from .const import CONF_SOURCE_ID, CONF_STATION_NAME, CONF_STATION_VERSION
 
 if TYPE_CHECKING:
     from homeassistant.core import HomeAssistant
 
-    from . import AlertRosterConfigEntry
+    from . import AlertRosterConfigEntry, AlertRosterData
 
 # `token` is never put into the payload by the code below, so this only ever
 # fires on something a future edit added -- which is exactly when it matters.
@@ -83,7 +93,11 @@ async def async_get_config_entry_diagnostics(
     # An entry that failed to set up has no `runtime_data` at all, and
     # diagnostics for a broken entry is precisely when somebody is asking for
     # help -- so this answers rather than raising.
-    data = getattr(entry, "runtime_data", None)
+    # Annotated rather than left as `getattr`'s `Any`, so `mypy --strict` still
+    # checks the payload path that matters. `runtime_data` is a bare annotation
+    # that Home Assistant deletes on unload, so this really is `None` for an
+    # entry that never loaded.
+    data: AlertRosterData | None = getattr(entry, "runtime_data", None)
     if data is None:
         payload["connection"] = None
         payload["open_alerts"] = []
@@ -98,27 +112,27 @@ async def async_get_config_entry_diagnostics(
 
 
 def _scrubbed(payload: dict[str, Any], token: str | None) -> dict[str, Any]:
-    """Replace the live token wherever it appears as a value.
+    """Serialize, replace the token in the text, and parse the result back.
 
-    Key-based redaction cannot see a credential that arrives under an innocent
-    key, and the strings in here are not all ours: an alert's `title` and
-    `detail` are whatever an automation wrote, and the rest is whatever the
-    station sent. Substring rather than equality, because a token pasted into
-    a sentence is still a leaked token.
+    Deliberately not a recursive walk. A walk has to know every container it
+    might meet, and the ones it would miss are not exotic -- `entry.data` is a
+    `MappingProxyType`, a station could send a tuple, a key can be a string
+    too. Encoding first collapses all of that into text, so the substitution
+    sees every byte the download would have carried, whatever shape it arrived
+    in.
+
+    `ExtendedJSONEncoder` is the encoder Home Assistant serves diagnostics
+    with, and it never raises: a value it cannot encode becomes a `repr`
+    string, which this then scrubs like any other.
+
+    Substring rather than equality, because a token pasted into a sentence is
+    still a leaked token.
     """
-    if not token:
-        return payload
-    # Rebuilt as a dict comprehension rather than handed to `_scrub` whole, so
-    # the return type stays `dict[str, Any]` instead of widening to `Any`.
-    return {key: _scrub(value, token) for key, value in payload.items()}
-
-
-def _scrub(value: Any, token: str) -> Any:
-    """Walk anything JSON-shaped, replacing `token` inside every string."""
-    if isinstance(value, str):
-        return value.replace(token, REDACTED)
-    if isinstance(value, dict):
-        return {key: _scrub(item, token) for key, item in value.items()}
-    if isinstance(value, list):
-        return [_scrub(item, token) for item in value]
-    return value
+    encoded = json.dumps(payload, cls=ExtendedJSONEncoder)
+    if token:
+        # The token as it appears *inside* JSON, which is the same as the token
+        # itself for the `lat_` + hex the station issues, and not the same if a
+        # future one carries a character JSON escapes.
+        encoded = encoded.replace(json.dumps(token)[1:-1], REDACTED)
+    decoded: dict[str, Any] = json.loads(encoded)
+    return decoded

@@ -162,8 +162,12 @@ class StationConnection:
         """
         return len(self._alerts)
 
+    @callback
     def diagnostics(self) -> dict[str, Any]:
         """Describe this connection for a diagnostics download (AHA-26).
+
+        Event-loop only, unlike `connected` and `open_alert_count`: it reads
+        the loop's clock through `_held_for`. `@callback` says so.
 
         The connection describes itself rather than letting `diagnostics.py`
         reach in, because the two signals worth having in a bug report --
@@ -186,7 +190,14 @@ class StationConnection:
             "connected": self._connected,
             "open_alert_count": len(self._alerts),
             "consecutive_failures": self._failures,
-            "connected_for_seconds": None if held_for is None else round(held_for, 1),
+            # Gated on `connected`, because `_connected_at` is cleared by
+            # `_next_backoff` and the `401` branch never reaches it: a revoked
+            # token would otherwise report a socket that has been "up" for as
+            # long as the entry has existed, on the download most likely to be
+            # asked for -- "it keeps asking me to pair again".
+            "connected_for_seconds": (
+                round(held_for, 1) if self._connected and held_for is not None else None
+            ),
             "task_running": self._task is not None and not self._task.done(),
         }
 

@@ -3,10 +3,14 @@
 Driven through `get_diagnostics_for_config_entry`, which fetches the real
 `/api/diagnostics/config_entry/<id>` endpoint and decodes the real JSON. That
 matters more here than in most tests: the assertion that has to hold is about
-the bytes a user downloads and pastes into a public issue, and Home Assistant's
-serializer renders anything it cannot encode with `repr()` rather than raising
--- so a leak introduced that way would never show up in a test that inspected
-the returned dict directly.
+the bytes a user downloads, and Home Assistant's serializer renders anything it
+cannot encode with `repr()` rather than raising -- so a leak introduced that
+way would never show up in a test that inspected the returned dict directly.
+
+The helper hands back the integration's own section of that download. The
+sections Home Assistant wraps it in -- the manifest, the setup times, the
+issue registry -- carry nothing from the config entry, so this integration's
+section is the whole of what it is responsible for.
 """
 
 from __future__ import annotations
@@ -137,6 +141,31 @@ async def test_a_token_pasted_into_an_alert_is_scrubbed_too(
     assert "**REDACTED**" in dumped
 
 
+async def test_a_token_key_from_the_station_is_redacted(
+    hass: HomeAssistant, station: FakeStation, hass_client: ClientSessionGenerator
+) -> None:
+    """Layer 2: a `token` key anywhere in the payload, however deep.
+
+    §9 makes the alert shape additive, so a newer station may send fields this
+    integration has never heard of. One called `token`, nested inside `cloud`,
+    is redacted by key without anything here knowing it was coming -- which is
+    the case the value sweep cannot cover, because the value is not *this*
+    entry's token.
+    """
+    entry = await _setup(hass, station)
+    alert = _alert()
+    alert["cloud"] = {"synced": True, "token": "lat_some_other_credential"}
+    station.alerts = {"alt_1": alert}
+    await station.push("alert.triggered", alert)
+    connection = entry.runtime_data.connection
+    await _until(lambda: connection.open_alert_count == 1, "the alert to be applied")
+
+    diagnostics = await get_diagnostics_for_config_entry(hass, hass_client, entry)
+
+    assert diagnostics["open_alerts"][0]["cloud"]["token"] == "**REDACTED**"
+    assert "lat_some_other_credential" not in json.dumps(diagnostics)
+
+
 # -- what it actually says -------------------------------------------------
 
 
@@ -192,6 +221,31 @@ async def test_diagnostics_report_a_station_that_went_away(
     assert diagnostics["connection"]["connected"] is False
     assert diagnostics["connection"]["consecutive_failures"] > 0
     assert diagnostics["open_alerts"] == []
+
+
+async def test_a_duration_is_only_reported_while_connected(
+    hass: HomeAssistant, station: FakeStation, hass_client: ClientSessionGenerator
+) -> None:
+    """`connected_for_seconds` describes a live socket, or says nothing.
+
+    Set up by hand because the run loop cannot produce this state today: every
+    path out of a socket clears `_connected_at` through the backoff, and the
+    one branch that skips the backoff -- a revoked token -- is only reached
+    from the upgrade (`api.py` raises `InvalidAuth` from the handshake), which
+    is before the socket ever came up.
+
+    Pinned anyway. A number sitting next to `connected: false` reads as a live
+    connection, and whoever opens the file cannot tell that it is stale.
+    """
+    entry = await _setup(hass, station)
+    connection = entry.runtime_data.connection
+    assert connection.diagnostics()["connected_for_seconds"] is not None
+
+    connection._async_set_connected(False)
+
+    diagnostics = await get_diagnostics_for_config_entry(hass, hass_client, entry)
+    assert diagnostics["connection"]["connected"] is False
+    assert diagnostics["connection"]["connected_for_seconds"] is None
 
 
 async def test_an_entry_that_never_loaded_still_answers(
