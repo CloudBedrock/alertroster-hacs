@@ -53,6 +53,7 @@ from .api import (
 from .const import (
     CONF_SOURCE_ID,
     CONF_STATION_NAME,
+    CONF_STATION_VERSION,
     DEFAULT_PORT,
     DOMAIN,
     PAIR_KIND,
@@ -146,16 +147,21 @@ class AlertRosterConfigFlow(ConfigFlow, domain=DOMAIN):
     _host: str = ""
     _port: int = DEFAULT_PORT
     _station: StationInfo = StationInfo()
+    # What the last successful `_async_reachable_address` probe learned. Kept
+    # apart from `_station`, which is what the *flow* has settled on: the
+    # zeroconf step takes the name off the announcement and only the version
+    # off the probe.
+    _probed: StationInfo = StationInfo()
     _wrong_codes: int = 0
 
     @property
     def _station_label(self) -> str:
         """Name the station in the UI, falling back to its address.
 
-        The station only tells us its name once it ships `GET /v1/discover`
-        (REQUIREMENTS.md §5 item 1), so until then the pair step's "Pair with
-        {name}" title reads as the host the user just typed -- which is still
-        the thing they are looking at.
+        A station too old for `GET /v1/discover` (§4.1) never tells us its
+        name, and a manual flow has no announcement to read one off, so the
+        pair step's "Pair with {name}" title falls back to the host the user
+        just typed -- which is still the thing they are looking at.
         """
         return self._station.name or self._host
 
@@ -211,7 +217,9 @@ class AlertRosterConfigFlow(ConfigFlow, domain=DOMAIN):
 
         self._host = host
         self._port = port
-        self._station = StationInfo(name=name)
+        # The name off the announcement, which a station too old for §4.1's
+        # probe still publishes; the version off the probe, which it does not.
+        self._station = StationInfo(name=name, version=self._probed.version)
         # What the discovery card is titled before anyone opens it.
         self.context["title_placeholders"] = {"name": name}
         return await self.async_step_pair()
@@ -252,6 +260,16 @@ class AlertRosterConfigFlow(ConfigFlow, domain=DOMAIN):
             updates[CONF_HOST] = host
             updates[CONF_PORT] = port
 
+        # After the probing above rather than before it: `_probed` is what
+        # those calls learned, and this is the same request that decided
+        # whether the address moved. A station that upgraded therefore says so
+        # on its next announcement, on its own timer, with nothing polling it.
+        if (
+            self._probed.version is not None
+            and entry.data.get(CONF_STATION_VERSION) != self._probed.version
+        ):
+            updates[CONF_STATION_VERSION] = self._probed.version
+
         return self.async_update_reload_and_abort(
             entry,
             data_updates=updates,
@@ -267,9 +285,13 @@ class AlertRosterConfigFlow(ConfigFlow, domain=DOMAIN):
         session = async_get_clientsession(self.hass)
         for address in addresses:
             try:
-                await AlertRosterClient(session, address, port).probe()
+                info = await AlertRosterClient(session, address, port).probe()
             except CannotConnect:
                 continue
+            # Kept, not discarded: this is the same request that would learn
+            # the station's version, and on a discovered station it is the only
+            # one anything makes outside pairing.
+            self._probed = info
             return address
         return None
 
@@ -378,7 +400,32 @@ class AlertRosterConfigFlow(ConfigFlow, domain=DOMAIN):
         self._host = entry_data[CONF_HOST]
         self._port = entry_data[CONF_PORT]
         name = entry_data.get(CONF_STATION_NAME)
-        self._station = StationInfo(name=name if isinstance(name, str) else None)
+        version = entry_data.get(CONF_STATION_VERSION)
+        self._station = StationInfo(
+            name=name if isinstance(name, str) else None,
+            version=version if isinstance(version, str) else None,
+        )
+        # Somebody is about to walk to the station anyway, so this is a free
+        # moment to find out what it is running now -- a station upgraded since
+        # pairing is exactly the kind that revoked the token.
+        try:
+            probed = await AlertRosterClient(
+                async_get_clientsession(self.hass), self._host, self._port
+            ).probe()
+        except CannotConnect as failure:
+            # Every other failure in this module says so; without this, a
+            # reauth form that took the request timeout to appear leaves
+            # nothing in the log explaining the wait. Host and port only --
+            # §6 keeps the token out of every log line.
+            _LOGGER.debug(
+                "Could not read the version of the AlertRoster station at %s:%s: %s",
+                self._host,
+                self._port,
+                failure,
+            )
+        else:
+            if probed.version is not None:
+                self._station = StationInfo(name=self._station.name, version=probed.version)
         return await self.async_step_reauth_confirm()
 
     async def async_step_reauth_confirm(
@@ -459,6 +506,7 @@ class AlertRosterConfigFlow(ConfigFlow, domain=DOMAIN):
                 data_updates={
                     CONF_TOKEN: result.token,
                     CONF_SOURCE_ID: result.source_id,
+                    CONF_STATION_VERSION: self._station.version,
                 },
             )
 
@@ -475,5 +523,6 @@ class AlertRosterConfigFlow(ConfigFlow, domain=DOMAIN):
                 CONF_TOKEN: result.token,
                 CONF_SOURCE_ID: result.source_id,
                 CONF_STATION_NAME: self._station.name,
+                CONF_STATION_VERSION: self._station.version,
             },
         )

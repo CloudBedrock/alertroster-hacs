@@ -30,7 +30,7 @@ from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.entity import Entity
 
 from .connection import StationConnection
-from .const import DEVICE_MANUFACTURER, DEVICE_MODEL, DOMAIN
+from .const import CONF_STATION_VERSION, DEVICE_MANUFACTURER, DEVICE_MODEL, DOMAIN
 
 if TYPE_CHECKING:
     from . import AlertRosterConfigEntry
@@ -51,6 +51,10 @@ class AlertRosterEntity(Entity):
         """Attach this entity to `entry`'s station, under `key`."""
         self._entry = entry
         self._connection = connection
+        # Guarded like the config flow guards it (`async_step_reauth`): this is
+        # whatever is in stored entry data, and the device registry coerces a
+        # non-string through a deprecated path rather than ignoring it.
+        version = entry.data.get(CONF_STATION_VERSION)
         self._attr_unique_id = f"{entry.entry_id}_{key}"
         self._attr_device_info = DeviceInfo(
             identifiers={(DOMAIN, entry.entry_id)},
@@ -64,10 +68,11 @@ class AlertRosterEntity(Entity):
             name=entry.title,
             manufacturer=DEVICE_MANUFACTURER,
             model=DEVICE_MODEL,
-            # No `sw_version`: the station's version is only ever offered by
-            # `GET /v1/discover`, which the shipped station answers with a 404
-            # (REQUIREMENTS.md §5 item 1). Nothing on an authenticated path
-            # carries it, so there is nothing honest to put here yet.
+            # What §4.1's probe last reported, off the entry rather than off
+            # the wire: `const.py` says why it is stored there. `None` on a
+            # station too old to answer that probe, which leaves the device
+            # page with no version rather than a guessed one.
+            sw_version=version if isinstance(version, str) else None,
         )
 
     @property

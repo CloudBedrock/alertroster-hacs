@@ -61,9 +61,11 @@ Home Assistant for this project runs on **ubuntu-dev**, not locally — see `dev
 ./dev/stations.sh   # stations on the LAN, and whether they answer
 ```
 
-Two things that bite: the station port is **not always 4747** (`om` is on 4798), and there is
-no unauthenticated endpoint yet — `GET /v1/discover` is a 404, so a `401 invalid_credentials`
-is what "reachable" looks like today. That rig is shared with esphome and mosquitto, so restart
+Two things that bite: the station port is **not always 4747** (`om` is on 4798), and the
+stations on the LAN still answer `GET /v1/discover` with a 404 — the endpoint is implemented in
+`alertroster-desktop` but no station on the rig is running a build with it, so a
+`401 invalid_credentials` is still what "reachable" looks like there, and paired devices show no
+software version until one is. That rig is shared with esphome and mosquitto, so restart
 only the `homeassistant` container.
 
 ## The wire contract lives in a sibling repo
