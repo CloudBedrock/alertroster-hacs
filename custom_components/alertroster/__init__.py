@@ -117,8 +117,11 @@ async def async_remove_entry(hass: HomeAssistant, entry: AlertRosterConfigEntry)
     happens after unload, so the entry's client is already gone, and an entry
     removed while it never loaded at all has none to take.
     """
+    # `isinstance` rather than `is not None`: entry data is `Any`, and this is
+    # the one path whose whole purpose is to send the credential, so a token
+    # that is not a string must not reach the Authorization header.
     token = entry.data.get(CONF_TOKEN)
-    if token is None:
+    if not isinstance(token, str) or not token:
         return
 
     client = AlertRosterClient(

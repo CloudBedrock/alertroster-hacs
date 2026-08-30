@@ -194,7 +194,10 @@ async def test_revoke_self_still_raises_on_a_real_refusal(
         await client.revoke_self()
 
     assert caught.value.status == 403
-    assert station.paired
+    # The token still works, which is what "nothing was revoked" means from
+    # here -- `station.paired` would read True whether or not that were so,
+    # because the override answers before the row is touched.
+    assert await client.list_alerts() == []
 
 
 # -- alerts ---------------------------------------------------------------
