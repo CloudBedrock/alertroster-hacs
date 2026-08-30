@@ -13,7 +13,7 @@ alerts on it from automations, and fires HA events when an alert is acknowledged
 M0–M6 milestone table. Read it before adding anything — it records decisions (and non-goals)
 that are not visible in the code.
 
-**Current state: M4 complete, M5 in progress.** `api.py` is the wire client; `config_flow.py` pairs
+**Current state: M5 complete, starting M6.** `api.py` is the wire client; `config_flow.py` pairs
 manually — `user` (host/port + reachability probe) then `pair` (8-digit code → source token) —
 and re-pairs through `reauth_confirm` when a token is revoked; `services.py` has `raise` and
 `resolve`; `connection.py` holds the events socket open per entry, seeding from
@@ -27,7 +27,11 @@ station and all on the `AlertRosterEntity` base in `entity.py` (device keyed on 
 `unavailable` whenever the socket is down — `_connected` is the deliberate exception, being what
 reports the outage); `__init__.py`'s `async_remove_entry` revokes the source token on the station
 (`DELETE /v1/sources/self`, protocol §6.4) as the entry is deleted, best effort — the entry goes
-whatever the station says. Still missing, and all that is left of M5: diagnostics.
+whatever the station says; `diagnostics.py` dumps the entry, the connection's state and the open
+alerts, keeping the token out three ways (an allowlist, `TO_REDACT`, and a value sweep for the
+token as a *value*, which key-based redaction cannot see). What is left is M6, which is release
+mechanics rather than code: the README's status banner, a v1.0.0 release, the
+`home-assistant/brands` PR and the `hacs/default` PR.
 
 Tests run against a fake station that is a **real `aiohttp` server** on a loopback port
 (`tests/conftest.py`), not a mocked client — `pytest-socket` blocks everything else, which is
