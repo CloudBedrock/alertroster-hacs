@@ -203,6 +203,11 @@ Tracked there as issues; none block installing as a custom repository, all make 
    scopes a source to its own.
 2. **A token may revoke itself** (`DELETE /v1/sources/self` or `DELETE /v1/sources/:own_id`
    with a source token) so removing the integration in HA removes the row on the station.
+   Implemented in `alertroster-desktop` (`core/localapi.cpp`, #50) and documented in
+   `LOCAL_ACK_PROTOCOL.md` §6.4; any *other* id from a source token is a `403` decided before
+   the row is looked up, so the route cannot be used to enumerate a station's other sources. A
+   station older than that answers `403` to the whole thing, which removal treats the way it
+   treats an unreachable one — the entry goes and the row is left for the Pairing screen.
 3. **Pairing dialog hint**: "Enter this code in Home Assistant → Settings → Devices & services".
 4. **Document reconnect** in `LOCAL_ACK_PROTOCOL.md` §4.6: the events socket carries transitions
    only; a client re-reads `GET /v1/alerts` after reconnecting.

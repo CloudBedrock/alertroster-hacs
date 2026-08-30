@@ -13,6 +13,7 @@ that is a decision rather than an oversight.
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 
 from homeassistant.config_entries import ConfigEntry
@@ -22,11 +23,13 @@ from homeassistant.helpers import config_validation as cv
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.typing import ConfigType
 
-from .api import AlertRosterClient
+from .api import AlertRosterClient, AlertRosterError, InvalidAuth
 from .connection import StationConnection
 from .const import DOMAIN
 from .events import async_setup_station_events
 from .services import async_setup_services
+
+_LOGGER = logging.getLogger(__name__)
 
 PLATFORMS: list[Platform] = [Platform.BINARY_SENSOR, Platform.EVENT, Platform.SENSOR]
 
@@ -100,3 +103,45 @@ async def async_unload_entry(hass: HomeAssistant, entry: AlertRosterConfigEntry)
         return False
     await entry.runtime_data.connection.async_stop()
     return True
+
+
+async def async_remove_entry(hass: HomeAssistant, entry: AlertRosterConfigEntry) -> None:
+    """Revoke this source's token on the station as the entry is deleted (§3.7).
+
+    Best effort on purpose. The entry goes away whatever happens here, because
+    an entry that cannot be deleted while the station is off is a worse failure
+    than a stale row on a Pairing screen -- and the README says how to clear
+    that row by hand.
+
+    The client is built here rather than taken from `runtime_data`: removal
+    happens after unload, so the entry's client is already gone, and an entry
+    removed while it never loaded at all has none to take.
+    """
+    # `isinstance` rather than `is not None`: entry data is `Any`, and this is
+    # the one path whose whole purpose is to send the credential, so a token
+    # that is not a string must not reach the Authorization header.
+    token = entry.data.get(CONF_TOKEN)
+    if not isinstance(token, str) or not token:
+        return
+
+    client = AlertRosterClient(
+        async_get_clientsession(hass),
+        entry.data[CONF_HOST],
+        entry.data[CONF_PORT],
+        token,
+    )
+    try:
+        await client.revoke_self()
+    except InvalidAuth:
+        # The station revoked it first, which is the state this call wanted.
+        # Not a warning: somebody deleting the row on the station and then the
+        # entry in Home Assistant did nothing wrong.
+        _LOGGER.debug("%s had already revoked this pairing", entry.title)
+    except AlertRosterError as err:
+        # `err` never carries the token -- see `api.py`'s second rule.
+        _LOGGER.warning(
+            "Could not unpair from the AlertRoster station %s (%s). "
+            "The row can be removed on the station's Pairing screen",
+            entry.title,
+            err,
+        )

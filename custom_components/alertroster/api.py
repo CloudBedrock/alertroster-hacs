@@ -378,6 +378,27 @@ class AlertRosterClient:
             kind=kind_returned if isinstance(kind_returned, str) else kind,
         )
 
+    async def revoke_self(self) -> None:
+        """Unpair this source from the station (§6.4).
+
+        `self` rather than the `source_id` the entry stored, because the token
+        is what the station identifies the caller by and the two spellings are
+        the same operation -- and because after a reauth the stored id names a
+        row that no longer exists while the token still names the live one.
+
+        A `404` is success: there is no row, which is the state this call
+        exists to reach. A `401` is left to the caller as `InvalidAuth`, since
+        only the caller knows whether a token the station no longer recognises
+        is the outcome it wanted or a fault -- for removal it is the outcome,
+        for anything else it is a reauth.
+        """
+        try:
+            await self._request("DELETE", "/v1/sources/self")
+        except StationError as err:
+            if err.status == 404:
+                return
+            raise
+
     async def list_alerts(self) -> list[dict[str, Any]]:
         """Open alerts this source raised, newest first (§4.3).
 

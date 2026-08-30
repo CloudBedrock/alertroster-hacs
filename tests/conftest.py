@@ -21,6 +21,9 @@ divergence at the point it matters):
   test can also describe the station we are asking for.
 * A wrong code, a closed pairing window and a station with no pairing authority
   are all the same bodiless `403`, on purpose, so a guesser learns nothing.
+* `DELETE /v1/sources/self` revokes the caller's own row and closes its
+  sockets (§6.4, shipped in `alertroster-desktop` #50); any *other* id from a
+  source token is a `403` decided before the row is looked up.
 * The events socket sends a `snapshot` frame on join. `send_join_snapshot`
   turns that off, to be the station `LOCAL_ACK_PROTOCOL.md` §4.6 describes
   rather than the one that shipped.
@@ -82,6 +85,14 @@ class FakeStation:
         # token revoked on the station looks like from here.
         self.revoked = False
 
+        # Whether the station still has a row for this source. §6.4 answers
+        # `404` once it does not, which is what a second revoke meets.
+        self.paired = True
+
+        # Answer a revoke with this status instead of carrying it out, so a
+        # test can tell the one status the client swallows from the rest.
+        self.revoke_status: int | None = None
+
         self.alerts: dict[str, dict[str, Any]] = {}
         self.sockets: list[web.WebSocketResponse] = []
 
@@ -137,6 +148,7 @@ class FakeStation:
         app.router.add_post("/v1/alerts/{alert_id}/resolve", self._resolve_alert)
         app.router.add_get("/v1/alerts/{alert_id}", self._get_alert)
         app.router.add_get("/v1/events", self._events)
+        app.router.add_delete("/v1/sources/{source_id}", self._revoke_source)
         # Without this the fixture's `server.close()` sits waiting out
         # aiohttp's shutdown timeout for every events socket still open --
         # which, now that the integration holds one for the life of the entry,
@@ -271,6 +283,31 @@ class FakeStation:
             return web.json_response({"error": "not_found"}, status=404)
         alert["status"] = "resolved"
         return web.json_response({"alert": alert})
+
+    async def _revoke_source(self, request: web.Request) -> web.Response:
+        """§6.4. A source may revoke itself, by `self` or by its own id.
+
+        The `403` for any other id is decided before the row is looked up, so
+        a refusal says nothing about whether that id exists -- which is the
+        property that keeps this from being a way to enumerate the station's
+        other sources.
+        """
+        if not self._authorized(request):
+            return self._unauthorized()
+
+        if self.revoke_status is not None:
+            return web.json_response({"error": "forbidden"}, status=self.revoke_status)
+
+        wanted = request.match_info["source_id"]
+        if wanted not in {"self", self.source_id}:
+            return web.json_response({"error": "forbidden"}, status=403)
+        if not self.paired:
+            return web.json_response({"error": "not_found"}, status=404)
+
+        self.paired = False
+        self.tokens.clear()
+        await self.drop_sockets()
+        return web.json_response({"revoked": self.source_id})
 
     async def _events(self, request: web.Request) -> web.StreamResponse:
         """§4.6. A `401` here is a failed upgrade, not a normal response."""
