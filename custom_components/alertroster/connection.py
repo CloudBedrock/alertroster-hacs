@@ -163,6 +163,45 @@ class StationConnection:
         return len(self._alerts)
 
     @callback
+    def diagnostics(self) -> dict[str, Any]:
+        """Describe this connection for a diagnostics download (AHA-26).
+
+        Event-loop only, unlike `connected` and `open_alert_count`: it reads
+        the loop's clock through `_held_for`. `@callback` says so.
+
+        The connection describes itself rather than letting `diagnostics.py`
+        reach in, because the two signals worth having in a bug report --
+        the consecutive failure count and whether the task is still alive --
+        are private, and reaching for them from another module would make
+        them public by accident.
+
+        `consecutive_failures` is the backoff's position, so it says how hard
+        this has been retrying, not merely that it is down; a socket that
+        held for `BACKOFF_MAX` resets it, which is why "connected, failures
+        4" is a real and useful state -- it means recently flapping.
+
+        Nothing here is the token, and nothing here is a live object: the
+        diagnostics serializer renders anything it cannot encode with
+        `repr()` and does not complain, so a stray object would be a silent
+        leak rather than an error.
+        """
+        held_for = self._held_for()
+        return {
+            "connected": self._connected,
+            "open_alert_count": len(self._alerts),
+            "consecutive_failures": self._failures,
+            # Gated on `connected`, because `_connected_at` is cleared by
+            # `_next_backoff` and the `401` branch never reaches it: a revoked
+            # token would otherwise report a socket that has been "up" for as
+            # long as the entry has existed, on the download most likely to be
+            # asked for -- "it keeps asking me to pair again".
+            "connected_for_seconds": (
+                round(held_for, 1) if self._connected and held_for is not None else None
+            ),
+            "task_running": self._task is not None and not self._task.done(),
+        }
+
+    @callback
     def async_add_listener(self, update: CALLBACK_TYPE) -> CALLBACK_TYPE:
         """Register `update`, and return the callable that unregisters it."""
         self._listeners.add(update)
