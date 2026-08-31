@@ -45,6 +45,12 @@ share this instance. REQUIREMENTS.md §6 requires that the `lat_` pairing token 
 reaches a log line — debug level here is where that regression would show up, so watch
 for it while testing pairing.
 
+## Releasing
+
+`dev/RELEASE.md` is the runbook for cutting a version: what must be true first, the bump-then-
+publish order HACS requires, the `home-assistant/brands` PR and the `hacs/default` PR.
+`dev/release-notes-v1.0.0.md` is the draft body for the first one.
+
 ## Stations
 
 `./dev/stations.sh` finds them. Two facts it encodes, both easy to get wrong:
