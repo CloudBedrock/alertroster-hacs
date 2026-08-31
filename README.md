@@ -14,8 +14,14 @@ react when the alert is acknowledged, resolved — or **expires with nobody answ
 Nothing here touches the internet. If the station has an AlertRoster cloud key, *it* escalates
 off-site; Home Assistant just sees the result.
 
-> **Status:** requirements and skeleton. See [REQUIREMENTS.md](REQUIREMENTS.md) for what is being
-> built and in what order.
+> **Status:** pre-release. Install as a HACS custom repository (below) — the default-store
+> listing lands with v1.0.0.
+
+## Requirements
+
+- Home Assistant **2025.1** or newer.
+- An AlertRoster receiver station on the same network, with **Accept sources from the LAN**
+  turned on (Service → Pairing on the station).
 
 ## Install
 
@@ -34,12 +40,14 @@ Copy `custom_components/alertroster` into `<config>/custom_components/` and rest
 1. On the station: **Service → Pairing**, tick **Accept sources from the LAN**, Apply.
 2. Home Assistant → Settings → Devices & services: the station appears as discovered. Click
    **Configure**. (No discovery? *Add integration → AlertRoster* and enter the station's
-   address; the port is 4747.)
+   address. The port is 4747 unless the station was moved off it — the value to use is the one
+   on the station's own Pairing screen.)
 3. On the station click **Pair a new source**; it shows an 8-digit code for five minutes.
 4. Type the code into Home Assistant. Done.
 
 Home Assistant now holds a source token for that station. The station lists it under Pairing and
-can revoke it at any time.
+can revoke it at any time — if it does, Home Assistant asks you to pair again rather than
+retrying forever.
 
 ## Use it
 
@@ -55,8 +63,12 @@ data:
   ack_timeout_seconds: 120
 ```
 
+Only `title` is required. Leave `ack_timeout_seconds` out and the station's own default applies —
+this integration holds no timers and has no opinion about when an alert has gone unanswered.
+
 Repeating the same `dedup_key` while the alert is open is harmless — you get the existing alert
-back — so retrying automations are safe.
+back — so retrying automations are safe. It is not an *update*, though: to change a live alert,
+resolve it and raise a new one.
 
 ### Resolve it when the condition clears
 
@@ -64,6 +76,19 @@ back — so retrying automations are safe.
 action: alertroster.resolve
 data:
   dedup_key: garage-door-night
+```
+
+Or by id, which `raise` hands back if you ask for it:
+
+```yaml
+- action: alertroster.raise
+  data:
+    title: Pump room flooding
+  response_variable: alert
+- delay: "00:05:00"
+- action: alertroster.resolve
+  data:
+    alert_id: "{{ alert.id }}"
 ```
 
 ### React when nobody answered
@@ -83,8 +108,27 @@ Also fired: `alertroster_triggered`, `alertroster_acknowledged`, `alertroster_re
 carries the whole alert as `alert`, the station's name as `station`, and the config entry it came
 from as `entry_id`.
 
-With two stations paired, say which one an automation is for by matching `entry_id` — it is
-stable, where the name is yours to change:
+There is no `acknowledge` action, and there will not be one: acknowledging is a person answering
+at a surface, not a program deciding the page has been dealt with. Home Assistant raises and
+resolves; people acknowledge.
+
+### With more than one station
+
+Both actions take an optional `config_entry` naming the station — the automation editor renders
+it as a picker:
+
+```yaml
+action: alertroster.raise
+data:
+  config_entry: 01J9Z4Q0X8V2N7B3K5R6T1W8Y4
+  title: Freezer over temperature
+```
+
+With exactly one station paired you can leave it out. With several, leaving it out is an error
+that names them — which station should page someone is not a guess this integration gets to make.
+
+Events tell you the same thing in reverse: match on `entry_id`, which is stable, where the name is
+yours to change.
 
 ```yaml
 trigger:
@@ -118,6 +162,51 @@ has to still be there during it. A stale board is worse than a blank one.
 A source only sees its own alerts, so these describe what Home Assistant raised — not everything
 the station is paging about.
 
+## When the station escalates off-site
+
+The cloud key lives on the **station**, never in Home Assistant — this integration makes no
+requests that leave your network. When the station has one, it opens an incident off-site
+alongside the local alert, and passes the result back on the alert as `alert.cloud`, exactly as
+the station sent it. `alert.cloud.link` is `ok`, `pending` or `failed`.
+
+**`link` is not settled when the alert is raised.** The station rings the panel first and opens
+the off-site incident afterwards, without waiting for it, so an `alertroster_triggered` event
+carries `cloud` as `null` or `link: pending` — nearly always. There is also no *update* event: a
+station sends only the four transitions above, each with the whole alert, so a `pending` that
+later becomes `failed` never arrives on its own. Branch on `link` in an event that comes later,
+not in `alertroster_triggered`.
+
+The one worth automating is the case the product exists for — nobody answered at the panel, and
+the off-site page did not go out either:
+
+```yaml
+trigger:
+  - platform: event
+    event_type: alertroster_unacknowledged
+condition: >
+  {{ trigger.event.data.alert.cloud is not none
+     and trigger.event.data.alert.cloud.link == 'failed' }}
+action:
+  - action: notify.persistent_notification
+    data:
+      message: >
+        Nobody answered "{{ trigger.event.data.alert.title }}" at the panel, and the off-site
+        page did not go out either.
+```
+
+By then the station has long since finished trying, so `link` says what actually happened. The
+same goes for `alertroster_acknowledged` and `alertroster_resolved`.
+
+While an alert is still open, Home Assistant's copy of it — including the copy in the `alerts`
+attribute on `sensor.<station>_open_alerts` — is whatever the last event carried. The set is
+re-read from the station when the integration starts and after every reconnect, and not otherwise,
+because nothing here polls. So a `link` that settles while the alert stays open is not something
+to build an automation on; wait for the transition.
+
+`alert.cloud` is `null` for a purely local alert. When somebody acknowledges from their phone
+instead of at the panel, it arrives here as an ordinary `alertroster_acknowledged` — the alert's
+`acknowledged_by.surface` is `cloud` rather than the name of a machine in the building.
+
 ## Unpair
 
 Deleting the integration in Home Assistant (Settings → Devices & services → ⋮ → **Delete**) tells
@@ -125,6 +214,18 @@ the station to revoke the token, so the row leaves its Pairing list too. If the 
 that moment the entry is still deleted — nothing traps you in an integration you cannot remove —
 and the row is left behind. Clear it on the station: **Service → Pairing**, find *Home Assistant*,
 revoke.
+
+## Troubleshooting
+
+Download diagnostics from the device page (⋮ → **Download diagnostics**) before opening an issue:
+it carries the connection state and the open alerts, with the pairing token redacted. Turn on
+debug logging with:
+
+```yaml
+logger:
+  logs:
+    custom_components.alertroster: debug
+```
 
 ## Development
 
