@@ -31,8 +31,9 @@ divergence at the point it matters):
 
 from __future__ import annotations
 
+import asyncio
 import secrets
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
 from typing import Any
 
@@ -404,3 +405,19 @@ async def second_station(socket_enabled: None) -> AsyncIterator[FakeStation]:
     """
     async with _serving("src_1cb0d3a2-7be") as fake:
         yield fake
+
+
+async def until(check: Callable[[], bool], what: str, timeout: float = 10.0) -> None:
+    """Wait for `check` to hold, or fail saying what never happened.
+
+    Shared rather than copied per module: three test files were waiting on the
+    same kinds of state, and a polling loop that drifts between copies is how
+    one of them quietly starts passing on a timeout.
+    """
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + timeout
+    while loop.time() < deadline:
+        if check():
+            return
+        await asyncio.sleep(0.01)
+    raise AssertionError(f"timed out waiting for {what}")

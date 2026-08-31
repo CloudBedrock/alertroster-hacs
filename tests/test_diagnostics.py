@@ -15,9 +15,7 @@ section is the whole of what it is responsible for.
 
 from __future__ import annotations
 
-import asyncio
 import json
-from collections.abc import Callable
 from typing import Any
 
 from homeassistant.const import CONF_HOST, CONF_PORT, CONF_TOKEN
@@ -35,20 +33,7 @@ from custom_components.alertroster.const import (
     DOMAIN,
 )
 
-from .conftest import FakeStation
-
-_TIMEOUT = 10.0
-
-
-async def _until(check: Callable[[], bool], what: str, timeout: float = _TIMEOUT) -> None:
-    """Wait for `check` to hold, or fail saying what never happened."""
-    loop = asyncio.get_running_loop()
-    deadline = loop.time() + timeout
-    while loop.time() < deadline:
-        if check():
-            return
-        await asyncio.sleep(0.01)
-    raise AssertionError(f"timed out waiting for {what}")
+from .conftest import FakeStation, until
 
 
 async def _setup(
@@ -77,7 +62,7 @@ async def _setup(
     await hass.async_block_till_done()
     if connect:
         connection = entry.runtime_data.connection
-        await _until(lambda: connection.connected, "the events socket to open")
+        await until(lambda: connection.connected, "the events socket to open")
         await hass.async_block_till_done()
     return entry
 
@@ -129,7 +114,7 @@ async def test_a_token_pasted_into_an_alert_is_scrubbed_too(
     station.alerts = {"alt_1": _alert(detail=f"pairing failed with {token}, retrying")}
     await station.push("alert.triggered", station.alerts["alt_1"])
     connection = entry.runtime_data.connection
-    await _until(lambda: connection.open_alert_count == 1, "the alert to be applied")
+    await until(lambda: connection.open_alert_count == 1, "the alert to be applied")
 
     diagnostics = await get_diagnostics_for_config_entry(hass, hass_client, entry)
 
@@ -158,7 +143,7 @@ async def test_a_token_key_from_the_station_is_redacted(
     station.alerts = {"alt_1": alert}
     await station.push("alert.triggered", alert)
     connection = entry.runtime_data.connection
-    await _until(lambda: connection.open_alert_count == 1, "the alert to be applied")
+    await until(lambda: connection.open_alert_count == 1, "the alert to be applied")
 
     diagnostics = await get_diagnostics_for_config_entry(hass, hass_client, entry)
 
@@ -177,7 +162,7 @@ async def test_diagnostics_describe_the_entry_and_its_connection(
     station.alerts = {"alt_1": _alert()}
     await station.push("alert.triggered", station.alerts["alt_1"])
     connection = entry.runtime_data.connection
-    await _until(lambda: connection.open_alert_count == 1, "the alert to be applied")
+    await until(lambda: connection.open_alert_count == 1, "the alert to be applied")
 
     diagnostics = await get_diagnostics_for_config_entry(hass, hass_client, entry)
 
@@ -212,8 +197,8 @@ async def test_diagnostics_report_a_station_that_went_away(
     entry = await _setup(hass, station)
     connection = entry.runtime_data.connection
     await station.stop()
-    await _until(lambda: not connection.connected, "the socket to notice the outage")
-    await _until(lambda: connection.diagnostics()["consecutive_failures"] > 0, "a retry")
+    await until(lambda: not connection.connected, "the socket to notice the outage")
+    await until(lambda: connection.diagnostics()["consecutive_failures"] > 0, "a retry")
 
     diagnostics = await get_diagnostics_for_config_entry(hass, hass_client, entry)
 

@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-from collections.abc import Callable, Iterator
+from collections.abc import Iterator
 from typing import Any
 
 import pytest
@@ -30,14 +30,15 @@ from custom_components.alertroster.connection import (
 )
 from custom_components.alertroster.const import CONF_SOURCE_ID, CONF_STATION_NAME, DOMAIN
 
-from .conftest import FakeStation
+from .conftest import FakeStation, until
+
+# How long a test waits on the events task before calling it stuck.
+_TIMEOUT = 10.0
+
 
 # How long a poll waits before calling it a failure. Generous on purpose: every
 # `_until` here is waiting on a loopback round-trip that normally takes
 # microseconds, so this only ever fires when something is actually wrong.
-_TIMEOUT = 10.0
-
-
 @pytest.fixture
 def fast_backoff(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     """Shrink the reconnect delay so a test does not wait out a real one.
@@ -48,17 +49,6 @@ def fast_backoff(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     monkeypatch.setattr(connection_module, "BACKOFF_START", 0.01)
     monkeypatch.setattr(connection_module, "BACKOFF_MAX", 0.05)
     yield
-
-
-async def _until(check: Callable[[], bool], what: str, timeout: float = _TIMEOUT) -> None:
-    """Wait for `check` to hold, or fail saying what never happened."""
-    loop = asyncio.get_running_loop()
-    deadline = loop.time() + timeout
-    while loop.time() < deadline:
-        if check():
-            return
-        await asyncio.sleep(0.01)
-    raise AssertionError(f"timed out waiting for {what}")
 
 
 async def _setup(hass: HomeAssistant, station: FakeStation) -> MockConfigEntry:
@@ -90,7 +80,7 @@ def _connection(entry: MockConfigEntry) -> StationConnection:
 async def _connected(entry: MockConfigEntry) -> StationConnection:
     """Wait until the entry's socket is open, then hand back the connection."""
     connection = _connection(entry)
-    await _until(lambda: connection.connected, "the events socket to open")
+    await until(lambda: connection.connected, "the events socket to open")
     return connection
 
 
@@ -209,7 +199,7 @@ async def test_connecting_notifies_listeners(hass: HomeAssistant, station: FakeS
     remove = connection.async_add_listener(lambda: seen.append(connection.connected))
 
     await station.drop_sockets()
-    await _until(lambda: bool(seen) and seen[-1] is False, "the disconnect to reach the listener")
+    await until(lambda: bool(seen) and seen[-1] is False, "the disconnect to reach the listener")
     remove()
 
     assert False in seen
@@ -225,7 +215,7 @@ async def test_a_removed_listener_stops_hearing(hass: HomeAssistant, station: Fa
     remove()
 
     await station.push("alert.triggered", _open_alert(station, "la_after", "After"))
-    await _until(
+    await until(
         lambda: any(a["id"] == "la_after" for a in connection.open_alerts),
         "the transition to be applied",
     )
@@ -242,17 +232,17 @@ async def test_a_transition_updates_the_open_alerts(
 
     alert = _open_alert(station, "la_live", "Freezer")
     await station.push("alert.triggered", alert)
-    await _until(lambda: len(connection.open_alerts) == 1, "the alert to be added")
+    await until(lambda: len(connection.open_alerts) == 1, "the alert to be added")
 
     # Somebody answered; the condition has not cleared, so it stays open.
     await station.push("alert.acknowledged", {**alert, "status": "acknowledged"})
-    await _until(
+    await until(
         lambda: connection.open_alerts[0]["status"] == "acknowledged",
         "the acknowledgement to be applied",
     )
 
     await station.push("alert.expired", {**alert, "status": "expired"})
-    await _until(lambda: connection.open_alerts == [], "the expiry to close the alert")
+    await until(lambda: connection.open_alerts == [], "the expiry to close the alert")
 
 
 async def test_an_unknown_transition_does_not_kill_the_socket(
@@ -265,7 +255,7 @@ async def test_an_unknown_transition_does_not_kill_the_socket(
     await station.push("alert.snoozed", {"id": "la_new", "status": "snoozed"})
     await station.push("alert.triggered", _open_alert(station, "la_known", "Known"))
 
-    await _until(
+    await until(
         lambda: [a["id"] for a in connection.open_alerts] == ["la_known"],
         "the known transition after the unknown one",
     )
@@ -295,8 +285,8 @@ async def test_reconnect_re_seeds_from_the_alerts_endpoint(
     _open_alert(station, "la_missed", "Happened while we were away")
     await station.drop_sockets()
 
-    await _until(lambda: _seeds(station) >= 2, "the re-seed after reconnecting")
-    await _until(lambda: connection.connected, "the socket to come back")
+    await until(lambda: _seeds(station) >= 2, "the re-seed after reconnecting")
+    await until(lambda: connection.connected, "the socket to come back")
     assert [a["id"] for a in connection.open_alerts] == ["la_missed"]
 
 
@@ -317,7 +307,7 @@ async def test_the_shipped_stations_join_snapshot_is_applied_too(
     station.snapshot_alerts = [only_in_the_snapshot]
     await station.drop_sockets()
 
-    await _until(
+    await until(
         lambda: [a["id"] for a in connection.open_alerts] == ["la_snap"],
         "the join snapshot to be applied",
     )
@@ -335,17 +325,17 @@ async def test_disconnected_while_the_socket_is_refused(
 
     station.events_status = 503
     await station.drop_sockets()
-    await _until(lambda: not connection.connected, "the connection to be reported down")
+    await until(lambda: not connection.connected, "the connection to be reported down")
 
     attempts = station.requests.count(("GET", "/v1/events"))
-    await _until(
+    await until(
         lambda: station.requests.count(("GET", "/v1/events")) > attempts,
         "another reconnect attempt",
     )
     assert connection.connected is False
 
     station.events_status = None
-    await _until(lambda: connection.connected, "the socket to come back on its own")
+    await until(lambda: connection.connected, "the socket to come back on its own")
 
 
 async def test_backoff_doubles_from_one_second_and_caps_at_sixty(
@@ -430,7 +420,7 @@ async def test_a_flapping_station_is_backed_off_in_practice(
 
     hanging_up = asyncio.create_task(hang_up())
     try:
-        await _until(lambda: connection._failures >= 3, "the backoff to climb")  # noqa: SLF001
+        await until(lambda: connection._failures >= 3, "the backoff to climb")  # noqa: SLF001
     finally:
         hanging_up.cancel()
         with contextlib.suppress(asyncio.CancelledError):
@@ -450,7 +440,7 @@ async def test_a_revoked_token_starts_reauth_and_stops(
     station.revoked = True
     await station.drop_sockets()
 
-    await _until(
+    await until(
         lambda: bool(hass.config_entries.flow.async_progress_by_handler(DOMAIN)),
         "the reauth flow to start",
     )
@@ -480,7 +470,7 @@ async def test_the_reauth_a_revoked_token_starts_can_be_finished(
 
     station.revoked = True
     await station.drop_sockets()
-    await _until(
+    await until(
         lambda: bool(hass.config_entries.flow.async_progress_by_handler(DOMAIN)),
         "the reauth flow to start",
     )
@@ -511,7 +501,7 @@ async def test_a_token_revoked_before_setup_starts_reauth(
 
     await _setup(hass, station)
 
-    await _until(
+    await until(
         lambda: bool(hass.config_entries.flow.async_progress_by_handler(DOMAIN)),
         "the reauth flow to start from the seed",
     )
@@ -532,7 +522,7 @@ async def test_unload_closes_the_socket(hass: HomeAssistant, station: FakeStatio
     # cancel and returning. The station drops its half a round-trip later,
     # which is as prompt as an observation made from the other end can be.
     assert connection.connected is False
-    await _until(lambda: station.sockets == [], "the station to see the socket close")
+    await until(lambda: station.sockets == [], "the station to see the socket close")
 
 
 async def test_reload_leaves_one_socket(hass: HomeAssistant, station: FakeStation) -> None:
@@ -599,7 +589,7 @@ async def test_a_listener_that_raises_does_not_take_the_connection_down(
 
     await station.push("alert.triggered", _open_alert(station, "la_guard", "Guarded"))
 
-    await _until(lambda: bool(notified), "the other listener to be notified anyway")
+    await until(lambda: bool(notified), "the other listener to be notified anyway")
     assert connection.connected is True
     assert "a listener with a bug" in caplog.text
 

@@ -6,6 +6,7 @@ from typing import Any
 
 import pytest
 import voluptuous as vol
+from homeassistant.config_entries import SOURCE_REAUTH, ConfigFlowResult
 from homeassistant.const import CONF_HOST, CONF_PORT, CONF_TOKEN
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import HomeAssistantError, ServiceValidationError
@@ -17,7 +18,7 @@ from custom_components.alertroster.const import (
     DOMAIN,
 )
 
-from .conftest import FakeStation
+from .conftest import FakeStation, until
 
 
 async def _setup(
@@ -264,6 +265,103 @@ async def test_a_revoked_token_says_to_pair_again(
 
     with pytest.raises(HomeAssistantError, match="pair it again"):
         await _raise(hass, title="Garage door open")
+
+
+async def _setup_connected(
+    hass: HomeAssistant, station: FakeStation, title: str = "studio"
+) -> MockConfigEntry:
+    """A station whose events socket is actually up before the test starts.
+
+    Load-bearing for the reauth tests below, not tidiness. `_setup` returns as
+    soon as setup finishes, with the connection task still racing to seed and
+    open its socket -- so a `401` armed straight afterwards is met by the *seed*
+    first, and the events task starts the reauth flow. The test would then pass
+    with the service code removed. Waiting for the socket puts the station in
+    the state the fix is about: connected, so nothing else is calling it, and
+    the service action is the only thing that can meet the `401`.
+    """
+    entry = await _setup(hass, station, title)
+    connection = entry.runtime_data.connection
+    await until(lambda: connection.connected, "the events socket to open")
+    await hass.async_block_till_done()
+    return entry
+
+
+def _reauth_flows(hass: HomeAssistant, entry: MockConfigEntry) -> list[ConfigFlowResult]:
+    """The reauth flows waiting on this entry, if any."""
+    return [
+        flow
+        for flow in hass.config_entries.flow.async_progress_by_handler(DOMAIN)
+        if flow["context"].get("source") == SOURCE_REAUTH
+        and flow["context"].get("entry_id") == entry.entry_id
+    ]
+
+
+async def test_a_revoked_token_starts_a_reauth_flow(
+    hass: HomeAssistant, station: FakeStation
+) -> None:
+    """CLAUDE.md: a `401` is a reauth, and that holds for a service call too.
+
+    The reachable case is a station that revoked the source while the socket
+    was up: the events task will not meet the `401` until it next reconnects,
+    which may be never if the socket stays open. Without this the automation
+    trace tells somebody to pair again and nothing offers them the form, so the
+    way out is deleting the entry -- which is what reauth exists to avoid.
+    """
+    entry = await _setup_connected(hass, station)
+    # The socket is up and nothing else has called the station, so there is
+    # nothing yet that could have started a flow. This is what stops the test
+    # passing on the events task's reauth instead of the one under test.
+    assert _reauth_flows(hass, entry) == []
+    station.revoked = True
+
+    with pytest.raises(HomeAssistantError, match="pair it again"):
+        await _raise(hass, title="Garage door open")
+    await hass.async_block_till_done()
+
+    flows = _reauth_flows(hass, entry)
+    assert len(flows) == 1
+    # The pairing form, not the address form: §3.6 takes the host off the entry,
+    # because the only thing that went wrong is the token.
+    assert flows[0]["step_id"] == "reauth_confirm"
+
+
+async def test_a_burst_of_revoked_calls_queues_one_flow(
+    hass: HomeAssistant, station: FakeStation
+) -> None:
+    """An automation that retries must not fill the UI with pairing forms.
+
+    `async_start_reauth` is what dedupes, so this pins the behaviour rather
+    than the call -- the events task reaching the same conclusion from the
+    other side is the second producer this has to survive.
+    """
+    entry = await _setup_connected(hass, station)
+    station.revoked = True
+
+    for _ in range(3):
+        with pytest.raises(HomeAssistantError, match="pair it again"):
+            await _raise(hass, title="Garage door open")
+        await hass.async_block_till_done()
+
+    assert len(_reauth_flows(hass, entry)) == 1
+
+
+async def test_resolve_starts_a_reauth_flow_too(hass: HomeAssistant, station: FakeStation) -> None:
+    """Both actions go through the same guard, and both need to.
+
+    `resolve` by `dedup_key` fails at the *listing* call rather than the
+    resolving one, which is a second `_station_errors` block -- so this is not
+    the path `raise` takes to get there.
+    """
+    entry = await _setup_connected(hass, station)
+    assert _reauth_flows(hass, entry) == []
+    station.revoked = True
+
+    with pytest.raises(HomeAssistantError, match="pair it again"):
+        await _resolve(hass, dedup_key="garage-door-night")
+    await hass.async_block_till_done()
+
+    assert len(_reauth_flows(hass, entry)) == 1
 
 
 # -- which station ---------------------------------------------------------
