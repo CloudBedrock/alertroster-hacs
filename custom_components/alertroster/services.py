@@ -113,12 +113,16 @@ def _target_entry(hass: HomeAssistant, call: ServiceCall) -> AlertRosterConfigEn
 
 
 @contextlib.contextmanager
-def _station_errors(entry: AlertRosterConfigEntry) -> Iterator[None]:
+def _station_errors(hass: HomeAssistant, entry: AlertRosterConfigEntry) -> Iterator[None]:
     """Turn every way a station call can fail into a readable error.
 
     A context manager rather than a wrapper taking the coroutine: the calls it
     guards return different shapes -- one alert, or a list of them -- and a
     wrapper would have had to claim one type for both and lie about the other.
+
+    It takes `hass` for one reason: a `401` has to start a reauth flow, and that
+    is the only thing here that does something to Home Assistant rather than
+    just describing what went wrong.
     """
     try:
         yield
@@ -130,8 +134,19 @@ def _station_errors(entry: AlertRosterConfigEntry) -> Iterator[None]:
     except CannotConnect as err:
         raise HomeAssistantError(f"could not reach the AlertRoster station {entry.title}") from err
     except InvalidAuth as err:
-        # AHA-9 turns this into a reauth flow; until that step exists, starting
-        # one would send the user to a step that is not there.
+        # The same answer `connection.py` gives the events socket, because it is
+        # the same fact: the token was revoked, and no amount of retrying fixes
+        # that. The socket gets here on its own the next time it reconnects --
+        # but a call that fails while the socket is still up would otherwise
+        # leave the user told to pair again with nothing in the UI offering to,
+        # and deleting the entry to re-add it is what reauth exists to avoid.
+        #
+        # `async_start_reauth` returns without doing anything when a reauth or
+        # reconfigure flow is already in progress for the entry, so the two
+        # paths -- and a burst of failing calls -- cannot queue several.
+        entry.async_start_reauth(hass)
+        # The message stays, and still names the station: this is read in an
+        # automation trace, where the repair notification is not.
         raise HomeAssistantError(
             f"the AlertRoster station {entry.title} no longer recognises "
             f"this Home Assistant -- pair it again"
@@ -156,7 +171,7 @@ async def _async_raise(call: ServiceCall) -> ServiceResponse:
     live alert means resolving it and raising a new one.
     """
     entry = _target_entry(call.hass, call)
-    with _station_errors(entry):
+    with _station_errors(call.hass, entry):
         alert = await entry.runtime_data.client.create_alert(
             title=call.data[ATTR_TITLE],
             detail=call.data.get(ATTR_DETAIL),
@@ -181,7 +196,7 @@ async def _async_resolve(call: ServiceCall) -> ServiceResponse:
     if alert_id is None:
         # §6.2 scopes the token to this source, so this searches what Home
         # Assistant raised, never everything the station is paging about.
-        with _station_errors(entry):
+        with _station_errors(call.hass, entry):
             open_alerts = await entry.runtime_data.client.list_alerts()
         matches = [a for a in open_alerts if a.get("dedup_key") == dedup_key]
         if not matches:
@@ -198,7 +213,7 @@ async def _async_resolve(call: ServiceCall) -> ServiceResponse:
             )
         alert_id = found
 
-    with _station_errors(entry):
+    with _station_errors(call.hass, entry):
         alert = await entry.runtime_data.client.resolve_alert(alert_id)
     return dict(alert)
 

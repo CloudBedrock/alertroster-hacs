@@ -14,8 +14,6 @@ as it was *before* the outage for as long as the seed took.
 
 from __future__ import annotations
 
-import asyncio
-from collections.abc import Callable
 from typing import Any
 
 from homeassistant.components.binary_sensor import BinarySensorDeviceClass
@@ -43,23 +41,11 @@ from custom_components.alertroster.const import (
     DOMAIN,
 )
 
-from .conftest import FakeStation
+from .conftest import FakeStation, until
 
-_TIMEOUT = 10.0
 _ALERTING = "binary_sensor.studio_alerting"
 _CONNECTED = "binary_sensor.studio_connected"
 _OPEN_ALERTS = "sensor.studio_open_alerts"
-
-
-async def _until(check: Callable[[], bool], what: str, timeout: float = _TIMEOUT) -> None:
-    """Wait for `check` to hold, or fail saying what never happened."""
-    loop = asyncio.get_running_loop()
-    deadline = loop.time() + timeout
-    while loop.time() < deadline:
-        if check():
-            return
-        await asyncio.sleep(0.01)
-    raise AssertionError(f"timed out waiting for {what}")
 
 
 async def _setup(
@@ -89,7 +75,7 @@ async def _setup(
     await hass.async_block_till_done()
     if connect:
         connection = entry.runtime_data.connection
-        await _until(lambda: connection.connected, "the events socket to open")
+        await until(lambda: connection.connected, "the events socket to open")
         await hass.async_block_till_done()
     return entry
 
@@ -116,7 +102,7 @@ async def _push(
     """Send one transition and wait for the count to catch up with it."""
     before = _state(hass, _OPEN_ALERTS).state
     await station.push(event, alert)
-    await _until(
+    await until(
         lambda: _state(hass, _OPEN_ALERTS).state != before,
         f"{event} to reach {_OPEN_ALERTS}",
     )
@@ -136,7 +122,7 @@ async def _drop(hass: HomeAssistant, station: FakeStation, entry: MockConfigEntr
     # back before the assertion that follows.
     station.events_status = 503
     await station.drop_sockets()
-    await _until(
+    await until(
         lambda: not entry.runtime_data.connection.connected, "the connection to notice the drop"
     )
     await hass.async_block_till_done()
@@ -283,7 +269,7 @@ async def test_an_alert_turns_alerting_on_and_counts_it(
     # Acknowledged is still open: somebody answered, but the condition has not
     # cleared and `GET /v1/alerts` keeps returning it.
     await station.push("alert.acknowledged", _alert(status="acknowledged"))
-    await _until(
+    await until(
         lambda: _state(hass, _OPEN_ALERTS).attributes[ATTR_ALERTS][0]["status"] == "acknowledged",
         "the acknowledgement to reach the sensor",
     )
@@ -385,7 +371,7 @@ async def test_unavailable_before_the_socket_ever_opens(
     # alert with the socket still refused -- and the entities must not render
     # it, because nothing is listening for what happens to it next.
     connection = entry.runtime_data.connection
-    await _until(lambda: connection.open_alert_count == 1, "the seed to land")
+    await until(lambda: connection.open_alert_count == 1, "the seed to land")
     await hass.async_block_till_done()
     assert not connection.connected
     assert _state(hass, _ALERTING).state == STATE_UNAVAILABLE
@@ -414,7 +400,7 @@ async def test_the_board_comes_back_re_seeded_after_a_reconnect(
     station.alerts = {}
 
     station.events_status = None
-    await _until(lambda: connection.connected, "the events socket to come back", timeout=30.0)
+    await until(lambda: connection.connected, "the events socket to come back", timeout=30.0)
     await hass.async_block_till_done()
 
     assert _state(hass, _CONNECTED).state == STATE_ON
@@ -454,7 +440,7 @@ async def test_the_seed_lands_before_the_entities_come_back(
 
     unsubscribe = async_track_state_change_event(hass, [_OPEN_ALERTS], _note)
     station.events_status = None
-    await _until(lambda: connection.connected, "the events socket to come back", timeout=30.0)
+    await until(lambda: connection.connected, "the events socket to come back", timeout=30.0)
     await hass.async_block_till_done()
     unsubscribe()
 

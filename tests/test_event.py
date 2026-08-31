@@ -9,8 +9,6 @@ would not have worked.
 
 from __future__ import annotations
 
-import asyncio
-from collections.abc import Callable
 from typing import Any
 
 import pytest
@@ -31,21 +29,9 @@ from custom_components.alertroster.const import (
     DOMAIN,
 )
 
-from .conftest import FakeStation
+from .conftest import FakeStation, until
 
-_TIMEOUT = 10.0
 _ENTITY_ID = "event.studio_alert"
-
-
-async def _until(check: Callable[[], bool], what: str, timeout: float = _TIMEOUT) -> None:
-    """Wait for `check` to hold, or fail saying what never happened."""
-    loop = asyncio.get_running_loop()
-    deadline = loop.time() + timeout
-    while loop.time() < deadline:
-        if check():
-            return
-        await asyncio.sleep(0.01)
-    raise AssertionError(f"timed out waiting for {what}")
 
 
 async def _setup(
@@ -74,7 +60,7 @@ async def _setup(
     await hass.async_block_till_done()
     if connect:
         connection = entry.runtime_data.connection
-        await _until(lambda: connection.connected, "the events socket to open")
+        await until(lambda: connection.connected, "the events socket to open")
         await hass.async_block_till_done()
     return entry
 
@@ -119,7 +105,7 @@ def _record_writes(hass: HomeAssistant) -> list[State]:
 async def _push(hass: HomeAssistant, station: FakeStation, transition: str, **kwargs: Any) -> State:
     """Send one transition and return the entity state it produced."""
     await station.push(transition, _alert(**kwargs))
-    await _until(
+    await until(
         lambda: (
             (state := hass.states.get(_ENTITY_ID)) is not None
             and state.attributes.get("event_type") is not None
@@ -270,7 +256,7 @@ async def test_a_later_transition_replaces_the_last(
 
     first = await _push(hass, station, "alert.triggered")
     await station.push("alert.expired", _alert())
-    await _until(
+    await until(
         lambda: (
             (state := hass.states.get(_ENTITY_ID)) is not None
             and state.attributes["event_type"] == "unacknowledged"
@@ -294,7 +280,7 @@ async def test_the_join_snapshot_fires_nothing(hass: HomeAssistant, station: Fak
     entry = await _setup(hass, station)
 
     connection = entry.runtime_data.connection
-    await _until(
+    await until(
         lambda: [a["id"] for a in connection.open_alerts] == ["alt_2"],
         "the join snapshot to reach the connection",
     )
@@ -369,7 +355,7 @@ async def test_unavailable_while_the_socket_is_down(
     # win the race back before the assertion.
     station.events_status = 503
     await station.drop_sockets()
-    await _until(
+    await until(
         lambda: not entry.runtime_data.connection.connected, "the connection to notice the drop"
     )
     await hass.async_block_till_done()
@@ -386,13 +372,13 @@ async def test_available_again_after_a_reconnect(hass: HomeAssistant, station: F
 
     station.events_status = 503
     await station.drop_sockets()
-    await _until(lambda: not connection.connected, "the connection to notice the drop")
+    await until(lambda: not connection.connected, "the connection to notice the drop")
     await hass.async_block_till_done()
     assert (down := hass.states.get(_ENTITY_ID)) is not None
     assert down.state == STATE_UNAVAILABLE
 
     station.events_status = None
-    await _until(lambda: connection.connected, "the events socket to come back", timeout=30.0)
+    await until(lambda: connection.connected, "the events socket to come back", timeout=30.0)
     await hass.async_block_till_done()
 
     state = await _push(hass, station, "alert.expired")

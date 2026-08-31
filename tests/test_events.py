@@ -9,7 +9,6 @@ not have fired. Nothing is mocked between the station and `hass.bus`.
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Callable
 from typing import Any
 
 import pytest
@@ -34,20 +33,7 @@ from custom_components.alertroster.const import (
     EVENT_UNACKNOWLEDGED,
 )
 
-from .conftest import FakeStation
-
-_TIMEOUT = 10.0
-
-
-async def _until(check: Callable[[], bool], what: str, timeout: float = _TIMEOUT) -> None:
-    """Wait for `check` to hold, or fail saying what never happened."""
-    loop = asyncio.get_running_loop()
-    deadline = loop.time() + timeout
-    while loop.time() < deadline:
-        if check():
-            return
-        await asyncio.sleep(0.01)
-    raise AssertionError(f"timed out waiting for {what}")
+from .conftest import FakeStation, until
 
 
 async def _setup(
@@ -70,7 +56,7 @@ async def _setup(
     assert await hass.config_entries.async_setup(entry.entry_id)
     await hass.async_block_till_done()
     connection = entry.runtime_data.connection
-    await _until(lambda: connection.connected, "the events socket to open")
+    await until(lambda: connection.connected, "the events socket to open")
     return entry
 
 
@@ -138,7 +124,7 @@ async def test_each_transition_fires_its_bus_event(
     await _setup(hass, station)
 
     await station.push(transition, _alert())
-    await _until(lambda: bool(bus.events), f"{expected} to fire")
+    await until(lambda: bool(bus.events), f"{expected} to fire")
     await hass.async_block_till_done()
 
     assert bus.only().event_type == expected
@@ -155,7 +141,7 @@ async def test_an_expiry_is_named_unacknowledged_not_expired(
     await _setup(hass, station)
 
     await station.push("alert.expired", _alert(status="expired"))
-    await _until(lambda: bool(bus.events), "the expiry event to fire")
+    await until(lambda: bool(bus.events), "the expiry event to fire")
 
     assert bus.only().event_type == "alertroster_unacknowledged"
 
@@ -182,7 +168,7 @@ async def test_the_event_carries_the_whole_alert_and_the_station(
     sent = _alert()
 
     await station.push("alert.triggered", sent)
-    await _until(lambda: bool(bus.events), "the trigger event to fire")
+    await until(lambda: bool(bus.events), "the trigger event to fire")
 
     data = bus.only().data
     assert data[ATTR_ALERT] == sent
@@ -198,7 +184,7 @@ async def test_the_cloud_field_is_passed_through_unmodified(
     sent = _alert()
 
     await station.push("alert.triggered", sent)
-    await _until(lambda: bool(bus.events), "the trigger event to fire")
+    await until(lambda: bool(bus.events), "the trigger event to fire")
 
     assert bus.only().data[ATTR_ALERT]["cloud"] == {
         "synced": True,
@@ -217,7 +203,7 @@ async def test_the_station_name_follows_a_rename(
     await hass.async_block_till_done()
 
     await station.push("alert.triggered", _alert())
-    await _until(lambda: bool(bus.events), "the trigger event to fire")
+    await until(lambda: bool(bus.events), "the trigger event to fire")
 
     assert bus.only().data[ATTR_STATION] == "kitchen"
 
@@ -234,7 +220,7 @@ async def test_the_entry_id_survives_a_rename(
     entry = await _setup(hass, station)
 
     await station.push("alert.triggered", _alert("alert_before"))
-    await _until(lambda: bool(bus.events), "the first trigger event to fire")
+    await until(lambda: bool(bus.events), "the first trigger event to fire")
     before = bus.only().data[ATTR_ENTRY_ID]
 
     bus.events.clear()
@@ -242,7 +228,7 @@ async def test_the_entry_id_survives_a_rename(
     await hass.async_block_till_done()
 
     await station.push("alert.triggered", _alert("alert_after"))
-    await _until(lambda: bool(bus.events), "the second trigger event to fire")
+    await until(lambda: bool(bus.events), "the second trigger event to fire")
 
     after = bus.only().data
     assert after[ATTR_STATION] == "kitchen"
@@ -261,7 +247,7 @@ async def test_two_stations_are_told_apart_by_entry_id(
     second = await _setup(hass, second_station, title="studio")
 
     await second_station.push("alert.triggered", _alert())
-    await _until(lambda: bool(bus.events), "the trigger event to fire")
+    await until(lambda: bool(bus.events), "the trigger event to fire")
 
     data = bus.only().data
     assert data[ATTR_STATION] == "studio"
@@ -282,7 +268,7 @@ async def test_the_event_payload_cannot_be_edited_into_the_connection(
     connection = entry.runtime_data.connection
 
     await station.push("alert.triggered", _alert())
-    await _until(lambda: bool(bus.events), "the trigger event to fire")
+    await until(lambda: bool(bus.events), "the trigger event to fire")
 
     payload = bus.only().data[ATTR_ALERT]
     payload["title"] = "rewritten"
@@ -306,7 +292,7 @@ async def test_the_readme_automation_renders(
     await _setup(hass, station)
 
     await station.push("alert.expired", _alert(status="expired"))
-    await _until(lambda: bool(bus.events), "the expiry event to fire")
+    await until(lambda: bool(bus.events), "the expiry event to fire")
 
     trigger = {"trigger": {"event": {"data": bus.only().data}}}
     title = Template("Nobody answered: {{ trigger.event.data.alert.title }}", hass).async_render(
@@ -345,9 +331,9 @@ async def test_the_open_alerts_are_current_when_the_event_fires(
     hass.bus.async_listen(EVENT_RESOLVED, record)
 
     await station.push("alert.triggered", _alert("alt_1"))
-    await _until(lambda: len(seen) == 1, "the trigger event to fire")
+    await until(lambda: len(seen) == 1, "the trigger event to fire")
     await station.push("alert.resolved", _alert("alt_1", status="resolved"))
-    await _until(lambda: len(seen) == 2, "the resolve event to fire")
+    await until(lambda: len(seen) == 2, "the resolve event to fire")
 
     assert seen == [["alt_1"], []]
 
@@ -372,7 +358,7 @@ async def test_the_join_snapshot_fires_nothing(
 
     # The snapshot is what put the alert in the set, so waiting for the set
     # proves the frame was delivered and not merely slow.
-    await _until(lambda: len(connection.open_alerts) == 1, "the snapshot to be applied")
+    await until(lambda: len(connection.open_alerts) == 1, "the snapshot to be applied")
     await hass.async_block_till_done()
 
     assert bus.types() == []
@@ -386,11 +372,11 @@ async def test_a_reconnect_re_seed_fires_nothing(
 
     entry = await _setup(hass, station)
     connection = entry.runtime_data.connection
-    await _until(lambda: len(connection.open_alerts) == 1, "the first seed")
+    await until(lambda: len(connection.open_alerts) == 1, "the first seed")
 
     await station.drop_sockets()
-    await _until(lambda: not connection.connected, "the socket to drop")
-    await _until(lambda: connection.connected, "the socket to come back")
+    await until(lambda: not connection.connected, "the socket to drop")
+    await until(lambda: connection.connected, "the socket to come back")
     await hass.async_block_till_done()
 
     assert bus.types() == []
@@ -407,7 +393,7 @@ async def test_an_unknown_transition_fires_nothing_and_keeps_the_socket(
     # Nothing observable follows an ignored frame, so prove the socket survived
     # by sending a known one after it and watching that arrive.
     await station.push("alert.expired", _alert())
-    await _until(lambda: bool(bus.events), "the expiry after it to fire")
+    await until(lambda: bool(bus.events), "the expiry after it to fire")
     await hass.async_block_till_done()
 
     assert bus.types() == [EVENT_UNACKNOWLEDGED]
@@ -428,7 +414,7 @@ async def test_a_transition_with_no_alert_fires_nothing(
     for socket in list(station.sockets):
         await socket.send_json({"event": "alert.expired"})
     await station.push("alert.triggered", _alert())
-    await _until(lambda: bool(bus.events), "the trigger after it to fire")
+    await until(lambda: bool(bus.events), "the trigger after it to fire")
 
     assert bus.types() == [EVENT_TRIGGERED]
 
@@ -446,7 +432,7 @@ async def test_a_transition_with_an_empty_alert_fires_nothing(
 
     await station.push("alert.expired", {})
     await station.push("alert.triggered", _alert())
-    await _until(lambda: bool(bus.events), "the trigger after it to fire")
+    await until(lambda: bool(bus.events), "the trigger after it to fire")
 
     assert bus.types() == [EVENT_TRIGGERED]
 
@@ -469,7 +455,7 @@ async def test_unloading_the_entry_unregisters_the_listener(
     connection = entry.runtime_data.connection
 
     await station.push("alert.triggered", _alert())
-    await _until(lambda: bool(bus.events), "an event to fire while loaded")
+    await until(lambda: bool(bus.events), "an event to fire while loaded")
     fired_while_loaded = bus.types()
 
     assert await hass.config_entries.async_unload(entry.entry_id)
@@ -495,10 +481,10 @@ async def test_reloading_the_entry_fires_each_transition_once(
     await hass.config_entries.async_reload(entry.entry_id)
     await hass.async_block_till_done()
     connection = entry.runtime_data.connection
-    await _until(lambda: connection.connected, "the socket to come back after the reload")
+    await until(lambda: connection.connected, "the socket to come back after the reload")
 
     await station.push("alert.expired", _alert())
-    await _until(lambda: bool(bus.events), "the expiry to fire")
+    await until(lambda: bool(bus.events), "the expiry to fire")
     await asyncio.sleep(0.05)
     await hass.async_block_till_done()
 
@@ -532,8 +518,8 @@ async def test_a_listener_that_raises_does_not_stop_the_others(
     connection.async_add_transition_listener(record)
 
     await station.push("alert.expired", _alert())
-    await _until(lambda: bool(bus.events), "the expiry to fire anyway")
-    await _until(lambda: bool(reached), "the listener after the broken one to run")
+    await until(lambda: bool(bus.events), "the expiry to fire anyway")
+    await until(lambda: bool(reached), "the listener after the broken one to run")
     await hass.async_block_till_done()
 
     assert reached == ["alert.expired"]
