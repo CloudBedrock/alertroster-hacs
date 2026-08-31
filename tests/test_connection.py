@@ -32,13 +32,13 @@ from custom_components.alertroster.const import CONF_SOURCE_ID, CONF_STATION_NAM
 
 from .conftest import FakeStation, until
 
-# How long a test waits on the events task before calling it stuck.
+# How long the `asyncio.wait_for` calls below wait on the events task before
+# calling it stuck. Generous on purpose: each is waiting on a loopback
+# round-trip that normally takes microseconds, so it only fires when something
+# is actually wrong. `until` in `conftest.py` has its own, for the same reason.
 _TIMEOUT = 10.0
 
 
-# How long a poll waits before calling it a failure. Generous on purpose: every
-# `_until` here is waiting on a loopback round-trip that normally takes
-# microseconds, so this only ever fires when something is actually wrong.
 @pytest.fixture
 def fast_backoff(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     """Shrink the reconnect delay so a test does not wait out a real one.
