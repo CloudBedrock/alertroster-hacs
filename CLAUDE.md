@@ -36,8 +36,7 @@ mechanics rather than code: the README's status banner, a v1.0.0 release, the
 Tests run against a fake station that is a **real `aiohttp` server** on a loopback port
 (`tests/conftest.py`), not a mocked client — `pytest-socket` blocks everything else, which is
 what enforces the no-network rule below. `requirements_dev.txt` is pinned on purpose:
-`pytest-homeassistant-custom-component` pins an exact Home Assistant in turn, and the pinned one
-matches the rig.
+`pytest-homeassistant-custom-component` pins an exact Home Assistant in turn.
 
 ## Commands
 
@@ -58,20 +57,18 @@ mypy tests                               # CI runs this too, and it is not --str
 
 ## Running it against a real station
 
-Home Assistant for this project runs on **ubuntu-dev**, not locally — see `dev/README.md`.
+The target is **the home Home Assistant** (HA OS with Supervisor, config at `/config`). That is
+where this integration is installed, paired and verified — see `dev/README.md` for getting a
+build onto it and driving the config flow over the REST API, and `./dev/stations.sh` for what is
+announcing on the LAN. This repo is public, so that machine is not named in it: keep its URL and an
+admin token as `HA_URL` and `HA_TOKEN` in `~/dev/ha/.env`, outside the repo.
 
-```sh
-./dev/sync.sh       # push the integration to the rig and restart HA (<15s)
-./dev/logs.sh       # follow the log, filtered to this integration
-./dev/stations.sh   # stations on the LAN, and whether they answer
-```
+Two things that bite: the station port is **not always 4747** — read it off the mDNS
+announcement — and a station running a build older than protocol §4.1 answers `404` to
+`GET /v1/discover`, so a `401` from any other endpoint is what "reachable" looks like there, and
+such a station shows no software version once paired.
 
-Two things that bite: the station port is **not always 4747** (`om` is on 4798), and the
-stations on the LAN still answer `GET /v1/discover` with a 404 — the endpoint is implemented in
-`alertroster-desktop` but no station on the rig is running a build with it, so a
-`401 invalid_credentials` is still what "reachable" looks like there, and paired devices show no
-software version until one is. That rig is shared with esphome and mosquitto, so restart
-only the `homeassistant` container.
+Restarting the home instance interrupts a production Home Assistant. Say so before doing it.
 
 ## The wire contract lives in a sibling repo
 
