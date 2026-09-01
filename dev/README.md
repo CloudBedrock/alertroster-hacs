@@ -1,14 +1,17 @@
 # Working on this integration
 
-The deployment target — and the real test — is **the home Home Assistant**,
-`homeassistant.cow-elnath.ts.net`. It is HA OS with Supervisor; the config directory is
-`/config`. There is no other Home Assistant in this project.
+The deployment target — and the real test — is **the home Home Assistant**. It is HA OS with
+Supervisor; the config directory is `/config`. There is no other Home Assistant in this project.
+
+This repo is public, so the machine is not named here. Keep its URL and an admin token in
+`~/dev/ha/.env` as `HA_URL` and `HA_TOKEN` — that file is outside the repo and stays out of it.
+The station's address comes off `./dev/stations.sh`.
 
 | | |
 |---|---|
-| HA | <https://homeassistant.cow-elnath.ts.net> |
-| Station | studio-1 (the Mac), `10.51.1.57:4747` |
-| Admin token | `HA_TOKEN` in `~/dev/ha/.env` |
+| HA | `$HA_URL` |
+| Station | studio-1 (the Mac), port 4747 |
+| Admin token | `$HA_TOKEN` |
 
 ## Getting a build onto it
 
@@ -36,7 +39,7 @@ Python is not reloaded in place, so every source change needs a restart.
 proves nothing. Start the flow instead:
 
 1. `POST /api/config/config_entries/flow` `{"handler": "alertroster"}` → the `user` step
-2. `POST .../flow/<flow_id>` `{"host": "10.51.1.57", "port": 4747}` → the `pair` step, which
+2. `POST .../flow/<flow_id>` `{"host": "<station ip>", "port": 4747}` → the `pair` step, which
    echoes the station name back if it reached it
 3. On the station: **Service → Pairing** → *Pair a new source* for the 8 digits. Five-minute
    window, three wrong tries closes it — only ask for the code once the flow is already sitting

@@ -57,10 +57,11 @@ mypy tests                               # CI runs this too, and it is not --str
 
 ## Running it against a real station
 
-The target is **the home Home Assistant**, `homeassistant.cow-elnath.ts.net` (HA OS with
-Supervisor, config at `/config`). That is where this integration is installed, paired and
-verified — see `dev/README.md` for getting a build onto it, driving the config flow over the
-REST API, and `./dev/stations.sh` for what is announcing on the LAN.
+The target is **the home Home Assistant** (HA OS with Supervisor, config at `/config`). That is
+where this integration is installed, paired and verified — see `dev/README.md` for getting a
+build onto it and driving the config flow over the REST API, and `./dev/stations.sh` for what is
+announcing on the LAN. This repo is public, so that machine is not named in it: keep its URL and an
+admin token as `HA_URL` and `HA_TOKEN` in `~/dev/ha/.env`, outside the repo.
 
 Two things that bite: the station port is **not always 4747** — read it off the mDNS
 announcement — and a station running a build older than protocol §4.1 answers `404` to
