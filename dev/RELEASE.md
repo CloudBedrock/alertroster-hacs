@@ -5,7 +5,7 @@ Bumping the version without publishing a release changes nothing a user can see;
 release without bumping the version ships a build that lies about itself. Both, in that order,
 or neither.
 
-The M6 issues this file covers: **AHA-29** (cut v1.0.0), **AHA-28** (brands), **AHA-30**
+The M6 issues this file covers: **AHA-29** (cut v1.0.0), **AHA-28** (brands — closed, see below), **AHA-30**
 (`hacs/default`).
 
 ## Before you cut
@@ -43,28 +43,29 @@ gh release create v1.0.0 --title v1.0.0 --notes-file dev/release-notes-v1.0.0.md
 
 Tag names carry the `v`; `manifest.json` does not (`1.0.0`). HACS shows the last five releases.
 
-## Then: brand icons (AHA-28)
+## Brand icons: nothing to do (AHA-28)
 
-The icons already live in `custom_components/alertroster/brand/`, which is where HACS and
-HA ≥ 2026.3 look. The default store and older HA read `home-assistant/brands` instead, so the
-same two files go there as well:
+**`home-assistant/brands` no longer accepts custom integrations.** Its pull request template
+says so outright — "Pull requests for adding new custom components will no longer be accepted" —
+and its `custom_integrations/` folder is marked legacy, superseded by the
+[Brands Proxy API](https://developers.home-assistant.io/blog/2026/02/24/brands-proxy-api).
+A PR there would be closed unread, and the template's "Type of change" list has no box for it.
 
-Clone it **outside this repo**. `gh repo fork --clone` clones into the working directory, and
-run from the repo root that leaves a whole nested checkout of `brands` inside the integration
-repo you are about to release:
+Nothing needs doing, because the icons are already in the only place that now matters:
+`custom_components/alertroster/brand/icon.png` (256x256) and `icon@2x.png` (512x512). Home
+Assistant reads those directly and prefers them over the CDN, and HACS's own `Check brands` is
+satisfied by that directory — the brands repository is only its *fallback* when the directory is
+missing. So this is not a precondition for `hacs/default` either, whatever the earlier version of
+this file said.
 
-```sh
-ICONS=$(git -C ~/dev/alertroster-hacs rev-parse --show-toplevel)/custom_components/alertroster/brand
-cd ~/dev                      # anywhere that is not the integration repo
-gh repo fork home-assistant/brands --clone --remote
-cd brands
-mkdir -p custom_integrations/alertroster
-cp "$ICONS/icon.png"     custom_integrations/alertroster/
-cp "$ICONS/icon@2x.png"  custom_integrations/alertroster/
-# PR against home-assistant/brands. Their CI checks the dimensions: 256x256 and 512x512.
-```
+One consequence to know rather than fix: local brand images need **HA 2026.3**, while `hacs.json`
+admits 2025.1. A user between those versions sees the placeholder icon, and there is no longer a
+route that would give them a real one.
 
-Merge this **before** the `hacs/default` PR — brands is one of that PR's automated checks.
+If you ever do want a PR against an Open Home Foundation repository, read their
+[AI policy](https://developers.home-assistant.io/docs/ai_policy) first: autonomous agents are not
+allowed to contribute, and a pull request has to be one you have reviewed and can explain in your
+own words.
 
 ## Then: the HACS default store (AHA-30)
 
@@ -76,6 +77,6 @@ Only after a release exists and both actions are green.
 2. PR against `hacs/default` adding `CloudBedrock/alertroster-hacs` to the `integration` file,
    **alphabetically** — the JSON-sorting check is one of the automated ones. Only the repo owner
    or a major contributor may open it.
-3. The rest of the checks: brands, manifest, HACS validation, repo activity, ≥1 release,
-   contributor, description/issues/topics.
+3. The rest of the checks: brands (satisfied by the in-repo `brand/` directory), manifest,
+   HACS validation, repo activity, ≥1 release, contributor, description/issues/topics.
 4. After merge it appears in the next scheduled scan, not immediately.
