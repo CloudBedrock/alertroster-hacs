@@ -1,68 +1,78 @@
-# Dev loop
+# Working on this integration
 
-Home Assistant for developing this integration runs on **ubuntu-dev**, not on your
-workstation: the container there is already host-networked, which is what lets
-zeroconf discovery of `_alertroster-receiver._tcp.local.` work at all, and it sits on
-the same LAN as the stations.
+The deployment target — and the real test — is **the home Home Assistant**,
+`homeassistant.cow-elnath.ts.net`. It is HA OS with Supervisor; the config directory is
+`/config`. There is no other Home Assistant in this project.
 
 | | |
 |---|---|
-| HA UI | <http://ubuntu-dev:8123> |
-| Stack | `/opt/homeassistant/docker-compose.yml` on ubuntu-dev (HA + esphome + mosquitto) |
-| HA config | `/opt/homeassistant/homeassistant` -> `/config` in the container |
-| This integration | `/opt/homeassistant/src/alertroster` -> `/config/custom_components/alertroster` |
+| HA | <https://homeassistant.cow-elnath.ts.net> |
+| Station | studio-1 (the Mac), `10.51.1.57:4747` |
+| Admin token | `HA_TOKEN` in `~/dev/ha/.env` |
 
-That last bind-mount was added to the stack's compose file for this project. The
-source under `src/` is a copy pushed by `dev/sync.sh`; it is not a checkout, so never
-edit it there -- the next sync deletes whatever you wrote.
+## Getting a build onto it
 
-This is a **shared rig**: esphome and mosquitto run beside HA, and a ZHA entry errors
-on startup for unrelated reasons (`Network settings do not match most recent backup`).
-Restart only the `homeassistant` container, never the whole stack.
-
-## The loop
+A custom integration is just a folder, so HACS is not required to try one. Only 80/443 are
+reachable and port 22 is unpublished, so the files go in through the **Terminal & SSH** add-on's
+web terminal (`/hassio/addon/core_ssh/info` → *Open Web UI* — the add-on pages are not under
+Settings in the sidebar):
 
 ```sh
-./dev/sync.sh          # rsync the integration up, restart HA, wait for it to answer (<15s)
-./dev/sync.sh -n       # sync without restarting
-./dev/restart.sh       # restart without syncing
-./dev/logs.sh          # follow the log, filtered to this integration
-./dev/logs.sh 'zeroconf|websocket'   # ...or to anything else
-./dev/stations.sh      # what stations are on the LAN, and do they answer
+cd /config && mkdir -p custom_components && \
+wget -qO /tmp/ar.tar.gz https://github.com/CloudBedrock/alertroster-hacs/archive/refs/heads/main.tar.gz && \
+tar -xzf /tmp/ar.tar.gz -C /tmp && rm -rf custom_components/alertroster && \
+cp -r /tmp/alertroster-hacs-main/custom_components/alertroster custom_components/
 ```
 
-Python is not reloaded in place, so **every source change needs a restart** — there is
-no faster path.
+Then restart Home Assistant — `POST /api/services/homeassistant/restart`, which times out by
+design; poll `/api/config` until `state == "RUNNING"`. **This is a production instance: say so
+before restarting it.**
 
-Override the target with `HA_HOST`, `HA_CONTAINER`, `HA_SRC`, `HA_URL` (see
-`dev/_env.sh`); the defaults point at ubuntu-dev.
+Python is not reloaded in place, so every source change needs a restart.
+
+## Pairing without touching the UI
+
+`alertroster` does not appear in `/api/config` components until an entry exists, so its absence
+proves nothing. Start the flow instead:
+
+1. `POST /api/config/config_entries/flow` `{"handler": "alertroster"}` → the `user` step
+2. `POST .../flow/<flow_id>` `{"host": "10.51.1.57", "port": 4747}` → the `pair` step, which
+   echoes the station name back if it reached it
+3. On the station: **Service → Pairing** → *Pair a new source* for the 8 digits. Five-minute
+   window, three wrong tries closes it — only ask for the code once the flow is already sitting
+   on the `pair` step.
+4. `POST .../flow/<flow_id>` `{"code": "…"}` → `create_entry`
+
+Entities land as `binary_sensor.studio_local_connected` / `_alerting`,
+`sensor.studio_local_open_alerts`, `event.studio_local_alert`.
 
 ## Logging
 
-`configuration.yaml` on the rig sets `custom_components.alertroster: debug` and
-deliberately leaves the global default alone, because other people's integrations
-share this instance. REQUIREMENTS.md §6 requires that the `lat_` pairing token never
-reaches a log line — debug level here is where that regression would show up, so watch
-for it while testing pairing.
+```yaml
+logger:
+  logs:
+    custom_components.alertroster: debug
+```
+
+REQUIREMENTS.md §6 requires that the `lat_` pairing token never reaches a log line. Debug level
+is where that regression shows up, so watch for it while testing pairing.
 
 ## Releasing
 
-`dev/RELEASE.md` is the runbook for cutting a version: what must be true first, the bump-then-
-publish order HACS requires, the `home-assistant/brands` PR and the `hacs/default` PR.
+`dev/RELEASE.md` is the runbook for cutting a version: what must be true first, the
+bump-then-publish order HACS requires, the `home-assistant/brands` PR and the `hacs/default` PR.
 `dev/release-notes-v1.0.0.md` is the draft body for the first one.
 
 ## Stations
 
-`./dev/stations.sh` finds them. Two facts it encodes, both easy to get wrong:
+`./dev/stations.sh` lists what is announcing on the LAN. Two facts it encodes, both easy to get
+wrong:
 
-- **The port is not always 4747.** `studio` (the Mac) is on 4747; `om` is on 4798.
-  Read the port off the mDNS announcement.
-- **There is no unauthenticated endpoint yet.** `GET /v1/discover` is a 404 as of
-  2026-08-28 (REQUIREMENTS.md §5 item 1 asks the station to add it). Every other
-  endpoint answers `401 invalid_credentials` without a token, so today **a 401 is the
-  liveness signal** — a reachable station answers 401, and only a connection failure
-  means unreachable.
+- **The port is not always 4747.** Read it off the mDNS announcement.
+- **A `401` means reachable.** `GET /v1/discover` is unauthenticated only on stations running a
+  build with protocol §4.1; older ones answer `404`. Every other endpoint answers
+  `401 invalid_credentials` without a token, so a connection failure — not a status code — is
+  what "unreachable" looks like.
 
-Before a pairing test, on the station: **Service -> Pairing**, tick *Accept sources
-from the LAN*, Apply, then *Pair a new source* for the 8-digit code. The code is valid
-for five minutes and three wrong attempts close the window.
+Before a pairing test, on the station: **Service → Pairing**, tick *Accept sources from the LAN*,
+Apply, then *Pair a new source*.

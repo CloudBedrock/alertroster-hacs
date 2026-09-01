@@ -345,7 +345,7 @@ async def test_a_station_that_goes_away_mid_flow_says_cannot_connect(
 async def test_the_token_reaches_no_log_record(
     hass: HomeAssistant, station: FakeStation, caplog: pytest.LogCaptureFixture
 ) -> None:
-    """REQUIREMENTS.md §6, and the reason the rig logs this at debug."""
+    """REQUIREMENTS.md §6, and the reason debug logging is on when pairing is tested."""
     with caplog.at_level(logging.DEBUG):
         result = await _start(hass)
         result = await _submit(hass, result["flow_id"], host=station.host, port=station.port)
