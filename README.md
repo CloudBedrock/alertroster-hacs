@@ -17,11 +17,24 @@ off-site; Home Assistant just sees the result.
 > **Status:** pre-release. Install as a HACS custom repository (below) — the default-store
 > listing lands with v1.0.0.
 
+## You'll need a receiver station
+
+This integration raises alerts; the **receiver station** is what answers them. Without one on
+your network there is nothing to sound the alarm, drive the relays, or acknowledge anything —
+so grab it first. It's free, and it runs on a Mac, a Windows box, a Linux desktop or a
+Raspberry Pi on the wall.
+
+**[Download the AlertRoster receiver station →](https://github.com/CloudBedrock/alertroster-desktop-releases/releases/latest)**
+
+Once it's installed, turn on **Accept sources from the LAN** under *Service → Pairing* so Home
+Assistant can reach it.
+
 ## Requirements
 
-- Home Assistant **2025.1** or newer.
-- An AlertRoster receiver station on the same network, with **Accept sources from the LAN**
-  turned on (Service → Pairing on the station).
+- Home Assistant **2025.3** or newer.
+- An [AlertRoster receiver station](https://github.com/CloudBedrock/alertroster-desktop-releases/releases/latest)
+  on the same network, with **Accept sources from the LAN** turned on (Service → Pairing on
+  the station).
 
 ## Install
 
