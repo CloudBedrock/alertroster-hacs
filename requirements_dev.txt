@@ -1,8 +1,11 @@
 # Pinned deliberately (AHA-3). `pytest-homeassistant-custom-component` pins an
-# exact Home Assistant in turn -- 0.13.357 pins 2026.8.3, which is what the dev
-# rig runs -- so leaving it unpinned would let a new HA release change what the
-# tests run against without anything in this repo changing. Bump it on purpose,
-# and check `dev/README.md`'s rig still matches.
+# exact Home Assistant in turn -- 0.13.357 pins 2026.8.3 -- so leaving it
+# unpinned would let a new HA release change what the tests run against without
+# anything in this repo changing. Bump it on purpose.
+#
+# This is the newest Home Assistant the suite runs against. The oldest is
+# pinned separately in .github/workflows/validate.yaml, and `hacs.json` must
+# agree with it.
 pytest-homeassistant-custom-component==0.13.357
 ruff==0.16.5
 mypy==2.3.1

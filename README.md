@@ -31,7 +31,7 @@ Assistant can reach it.
 
 ## Requirements
 
-- Home Assistant **2025.1** or newer.
+- Home Assistant **2025.3** or newer.
 - An [AlertRoster receiver station](https://github.com/CloudBedrock/alertroster-desktop-releases/releases/latest)
   on the same network, with **Accept sources from the LAN** turned on (Service → Pairing on
   the station).

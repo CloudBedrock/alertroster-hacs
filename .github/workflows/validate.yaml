@@ -24,6 +24,29 @@ jobs:
       - uses: actions/checkout@v4
       - uses: home-assistant/actions/hassfest@master
 
+  tests-floor:
+    name: Tests (oldest supported HA)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          # HA 2025.3 pins deps (orjson, pydantic-core, ciso8601) that have no
+          # 3.14 wheels, so the floor can only be exercised on 3.13.
+          python-version: "3.13"
+      # `hacs.json`'s `homeassistant` key is a promise made to strangers
+      # installing this, so it is tested rather than asserted. 0.13.222 pins
+      # Home Assistant 2025.3.1, the oldest release carrying every API the
+      # integration imports: `helpers.service_info.zeroconf` arrived in 2025.2
+      # and `AddConfigEntryEntitiesCallback` in 2025.3, and on 2025.2.5 the
+      # import fails outright. Raise this pin and `hacs.json` together.
+      - run: pip install "pytest-homeassistant-custom-component==0.13.222"
+      # The test harness at that pin has no `components.diagnostics` helper,
+      # which `tests/test_diagnostics.py` imports. That is the rig missing a
+      # module on an old release, not the integration needing a newer Home
+      # Assistant -- `diagnostics.py` itself imports nothing that old HA lacks.
+      - run: pytest --ignore=tests/test_diagnostics.py
+
   tests:
     name: Tests
     runs-on: ubuntu-latest
