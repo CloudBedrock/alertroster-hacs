@@ -286,6 +286,55 @@ async def test_a_wrong_code_can_be_retried(hass: HomeAssistant, station: FakeSta
     assert result["type"] is FlowResultType.CREATE_ENTRY
 
 
+async def test_the_code_pairs_as_the_station_groups_it(
+    hass: HomeAssistant, station: FakeStation
+) -> None:
+    """AHA-43: the station shows `9615 5668`; that is what gets typed.
+
+    Hit for real pairing the home instance. `.strip()` left the inner space
+    alone, the station saw a code that was not its code, and the flow said
+    `invalid_code` -- correctly, about the wrong thing. The cost was not a
+    retry: three of those close the pairing window.
+    """
+    grouped = f"{station.valid_code[:4]} {station.valid_code[4:]}"
+    assert grouped != station.valid_code
+
+    result = await _start(hass)
+    result = await _submit(hass, result["flow_id"], host=station.host, port=station.port)
+    result = await _submit(hass, result["flow_id"], code=grouped)
+
+    assert result["type"] is FlowResultType.CREATE_ENTRY
+
+
+async def test_a_hyphenated_code_pairs_too(hass: HomeAssistant, station: FakeStation) -> None:
+    """The same rule, for the other separator a person might read or type."""
+    result = await _start(hass)
+    result = await _submit(hass, result["flow_id"], host=station.host, port=station.port)
+    result = await _submit(
+        hass,
+        result["flow_id"],
+        code=f"{station.valid_code[:4]}-{station.valid_code[4:]}",
+    )
+
+    assert result["type"] is FlowResultType.CREATE_ENTRY
+
+
+async def test_separators_cannot_rescue_a_wrong_code(
+    hass: HomeAssistant, station: FakeStation
+) -> None:
+    """Stripping what is between the digits must not soften the digits.
+
+    The guard on the fix: a code wrong in its digits stays wrong, and still
+    counts against the station's three attempts.
+    """
+    result = await _start(hass)
+    result = await _submit(hass, result["flow_id"], host=station.host, port=station.port)
+    result = await _submit(hass, result["flow_id"], code="0000 0000")
+
+    assert result["type"] is FlowResultType.FORM
+    assert result["errors"] == {"base": "invalid_code"}
+
+
 async def test_the_third_wrong_code_says_the_window_has_closed(
     hass: HomeAssistant, station: FakeStation
 ) -> None:

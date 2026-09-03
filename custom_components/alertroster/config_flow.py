@@ -83,6 +83,24 @@ STEP_PAIR = "pair"
 STEP_REAUTH_CONFIRM = "reauth_confirm"
 
 
+def _code_digits(code: str) -> str:
+    """The pairing code as the wire wants it, from the code as a person read it.
+
+    Protocol §6.1 sends eight bare digits. The station *shows* them grouped, so
+    that is what gets typed -- and `9615 5668` on the wire is a `403`, which the
+    step then reports as a wrong code. It is not a wrong code, and the cost of
+    treating it as one is not one retry: three wrong codes close the pairing
+    window, so trusting the grouping sends the user back to the station.
+
+    Keeping only the digits also covers a hyphen, and cannot turn a wrong code
+    into a right one -- a code that is wrong in its digits stays wrong. Length
+    is deliberately not checked here: whether eight digits are the *current*
+    eight is the station's judgement, and a local rule would be one more thing
+    to keep in step with §6.1.
+    """
+    return "".join(c for c in code if c.isdigit())
+
+
 def _is_usable_host(host: str, port: int) -> bool:
     """Whether `host` can address a station at all.
 
@@ -451,7 +469,7 @@ class AlertRosterConfigFlow(ConfigFlow, domain=DOMAIN):
                 # AHA-32: the station's Pairing list shows this, so it says
                 # which Home Assistant, not merely that it is one.
                 name = self.hass.config.location_name.strip() or PAIR_NAME_FALLBACK
-                result = await client.pair(user_input[CONF_CODE].strip(), name, PAIR_KIND)
+                result = await client.pair(_code_digits(user_input[CONF_CODE]), name, PAIR_KIND)
             except CannotConnect:
                 errors["base"] = "cannot_connect"
             except PairingWindowClosed:
