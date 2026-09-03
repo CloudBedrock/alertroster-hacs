@@ -97,7 +97,7 @@
         },
         "ack_timeout_seconds": {
           "name": "Acknowledgement timeout",
-          "description": "How long the station waits for someone to answer before the alert expires. Leave empty to use the station's own default."
+          "description": "How long the station waits for someone to answer before the alert expires. Leave empty to use the station's own default. 0 means it never expires: the station keeps paging until a person answers, and \"nobody answered\" will never fire for it. Use 0 when the alert should reach a phone off-site, because the station only escalates once this has run out."
         }
       }
     },

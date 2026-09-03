@@ -79,6 +79,11 @@ data:
 Only `title` is required. Leave `ack_timeout_seconds` out and the station's own default applies —
 this integration holds no timers and has no opinion about when an alert has gone unanswered.
 
+Set `ack_timeout_seconds: 0` and the alert **never expires**: the station keeps paging until a
+person answers it. Nothing will ever fire `alertroster_unacknowledged` for such an alert, so an
+automation that branches on "nobody answered" should not use `0`. What `0` is for is the opposite
+case — see below.
+
 Repeating the same `dedup_key` while the alert is open is harmless — you get the existing alert
 back — so retrying automations are safe. It is not an *update*, though: to change a live alert,
 resolve it and raise a new one.
@@ -219,6 +224,24 @@ to build an automation on; wait for the transition.
 `alert.cloud` is `null` for a purely local alert. When somebody acknowledges from their phone
 instead of at the panel, it arrives here as an ordinary `alertroster_acknowledged` — the alert's
 `acknowledged_by.surface` is `cloud` rather than the name of a machine in the building.
+
+One field decides whether that can happen at all. `ack_timeout_seconds` is also the station's
+*grace period*: it does not escalate off-site until that time has run out, so nobody's phone is
+rung while somebody might still be walking to the panel. That is the right behaviour, and it has
+a consequence worth knowing before you write the automation:
+
+| `ack_timeout_seconds` | what happens |
+|---|---|
+| `120` | the panel sounds for two minutes, then expires **and** the phone rings — you get `alertroster_unacknowledged`, and the answer arrives too late to be an acknowledgement |
+| `0` | the phone rings straight away and the panel keeps sounding; whoever gets there first — the kitchen or the car park — stops it |
+
+So an alert meant to reach someone who is not in the building wants `0`. An alert meant to be
+noticed locally, with "nobody answered" as the fallback, wants a real timeout. They are different
+alerts, and the same automation cannot be both.
+
+Note also that `alert.cloud` is `null` on `alertroster_triggered` itself — the off-site incident
+has not been opened yet when the local alert fires. The populated object arrives with the next
+event for that alert, so a condition on `alert.cloud.link` will never match at trigger time.
 
 ## Unpair
 

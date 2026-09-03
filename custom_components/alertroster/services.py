@@ -67,10 +67,13 @@ RAISE_SCHEMA = vol.Schema(
         # urgency at `high`, while expiry is the station's business entirely.
         vol.Optional(ATTR_URGENCY, default="high"): vol.In(URGENCIES),
         vol.Optional(ATTR_DEDUP_KEY): cv.string,
-        # Bounded to match services.yaml: the UI selector already refuses
-        # anything outside this, and a YAML automation should not be able to
-        # send a 0 the form makes unreachable.
-        vol.Optional(ATTR_ACK_TIMEOUT): vol.All(cv.positive_int, vol.Range(min=1, max=86400)),
+        # Bounded to match services.yaml, and `0` is inside the bound on
+        # purpose (AHA-41). §2.1 gives it a meaning -- no timeout, the alert
+        # stays up until a person answers -- and it is the only value that lets
+        # somebody far away answer: §7.1 forwards this as `local_grace_seconds`,
+        # so the core holds its first escalation for exactly this long and any
+        # positive value pages the phone at the moment the panel gives up.
+        vol.Optional(ATTR_ACK_TIMEOUT): vol.All(cv.positive_int, vol.Range(min=0, max=86400)),
     }
 )
 
