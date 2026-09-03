@@ -35,7 +35,7 @@ raise:
       example: 120
       selector:
         number:
-          min: 1
+          min: 0
           max: 86400
           unit_of_measurement: seconds
           mode: box

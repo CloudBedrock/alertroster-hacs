@@ -139,15 +139,16 @@ async def test_raise_rejects_an_urgency_the_station_does_not_have(
     assert ("POST", "/v1/alerts") not in station.requests
 
 
-@pytest.mark.parametrize("bad", [0, -1, 86_401])
+@pytest.mark.parametrize("bad", [-1, 86_401])
 async def test_ack_timeout_is_bounded_the_way_the_form_bounds_it(
     hass: HomeAssistant, station: FakeStation, bad: int
 ) -> None:
     """The schema has to agree with services.yaml, not just the UI.
 
-    The selector refuses anything outside 1..86400, but a YAML automation never
-    meets the selector -- so without the same bound in the schema, `0` reaches
-    the station through a door the form keeps shut.
+    The selector refuses anything outside 0..86400, but a YAML automation never
+    meets the selector -- so without the same bound in the schema, an automation
+    reaches the station through a door the form keeps shut. `0` is inside the
+    bound and has its own tests below.
     """
     await _setup(hass, station)
 
@@ -155,6 +156,73 @@ async def test_ack_timeout_is_bounded_the_way_the_form_bounds_it(
         await _raise(hass, title="A", ack_timeout_seconds=bad)
 
     assert ("POST", "/v1/alerts") not in station.requests
+
+
+async def test_ack_timeout_zero_is_accepted(hass: HomeAssistant, station: FakeStation) -> None:
+    """AHA-41: §2.1 gives `0` a meaning, so the schema has to let it through.
+
+    It is the only value that lets somebody far away answer: §7.1 forwards this
+    as `local_grace_seconds`, so any positive value pages the phone at the exact
+    moment the panel gives up, and `0` is what keeps the alert open until a
+    person does.
+    """
+    await _setup(hass, station)
+
+    alert = await _raise(hass, title="Pump room flooding", ack_timeout_seconds=0)
+
+    assert alert["ack_timeout_seconds"] == 0
+
+
+@pytest.mark.parametrize("fractional", [0.5, 0.9])
+async def test_a_fractional_ack_timeout_is_refused_not_rounded_to_never(
+    hass: HomeAssistant, station: FakeStation, fractional: float
+) -> None:
+    """Coercion truncates, and `0` is no longer a harmless place to land.
+
+    While the bound started at 1, `0.5` truncated to `0` and failed the range,
+    so a template that divided badly got told so. Now `0` means "never expires"
+    -- the same truncation would hand that automation an alert nothing can
+    expire, silently, which is the opposite of the sub-second timeout it asked
+    for.
+    """
+    await _setup(hass, station)
+
+    with pytest.raises(vol.Invalid):
+        await _raise(hass, title="A", ack_timeout_seconds=fractional)
+
+    assert ("POST", "/v1/alerts") not in station.requests
+
+
+async def test_a_whole_float_is_still_accepted(hass: HomeAssistant, station: FakeStation) -> None:
+    """The guard is about the fraction, not about the type.
+
+    Templates hand Home Assistant floats routinely, and `120.0` is a perfectly
+    good two minutes.
+    """
+    await _setup(hass, station)
+
+    alert = await _raise(hass, title="A", ack_timeout_seconds=120.0)
+
+    assert alert["ack_timeout_seconds"] == 120
+
+
+async def test_ack_timeout_zero_is_sent_rather_than_swallowed(
+    hass: HomeAssistant, station: FakeStation
+) -> None:
+    """The trap in accepting `0`: it is falsy, and omission means the opposite.
+
+    A field left out asks the station for *its* default (300s -- an alert that
+    expires). A `0` sent asks for one that never does. Anything on the path that
+    tests the value for truth rather than for `None` turns the second request
+    into the first, and the automation that meant "keep paging until a person
+    answers" silently gets a five-minute timer instead.
+    """
+    await _setup(hass, station)
+
+    await _raise(hass, title="A", ack_timeout_seconds=0)
+
+    assert "ack_timeout_seconds" in station.created[0]
+    assert station.created[0]["ack_timeout_seconds"] == 0
 
 
 async def test_a_repeat_with_a_live_dedup_key_is_a_success(
