@@ -173,6 +173,39 @@ async def test_ack_timeout_zero_is_accepted(hass: HomeAssistant, station: FakeSt
     assert alert["ack_timeout_seconds"] == 0
 
 
+@pytest.mark.parametrize("fractional", [0.5, 0.9])
+async def test_a_fractional_ack_timeout_is_refused_not_rounded_to_never(
+    hass: HomeAssistant, station: FakeStation, fractional: float
+) -> None:
+    """Coercion truncates, and `0` is no longer a harmless place to land.
+
+    While the bound started at 1, `0.5` truncated to `0` and failed the range,
+    so a template that divided badly got told so. Now `0` means "never expires"
+    -- the same truncation would hand that automation an alert nothing can
+    expire, silently, which is the opposite of the sub-second timeout it asked
+    for.
+    """
+    await _setup(hass, station)
+
+    with pytest.raises(vol.Invalid):
+        await _raise(hass, title="A", ack_timeout_seconds=fractional)
+
+    assert ("POST", "/v1/alerts") not in station.requests
+
+
+async def test_a_whole_float_is_still_accepted(hass: HomeAssistant, station: FakeStation) -> None:
+    """The guard is about the fraction, not about the type.
+
+    Templates hand Home Assistant floats routinely, and `120.0` is a perfectly
+    good two minutes.
+    """
+    await _setup(hass, station)
+
+    alert = await _raise(hass, title="A", ack_timeout_seconds=120.0)
+
+    assert alert["ack_timeout_seconds"] == 120
+
+
 async def test_ack_timeout_zero_is_sent_rather_than_swallowed(
     hass: HomeAssistant, station: FakeStation
 ) -> None:

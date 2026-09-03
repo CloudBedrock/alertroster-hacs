@@ -239,10 +239,6 @@ So an alert meant to reach someone who is not in the building wants `0`. An aler
 noticed locally, with "nobody answered" as the fallback, wants a real timeout. They are different
 alerts, and the same automation cannot be both.
 
-Note also that `alert.cloud` is `null` on `alertroster_triggered` itself — the off-site incident
-has not been opened yet when the local alert fires. The populated object arrives with the next
-event for that alert, so a condition on `alert.cloud.link` will never match at trigger time.
-
 ## Unpair
 
 Deleting the integration in Home Assistant (Settings → Devices & services → ⋮ → **Delete**) tells

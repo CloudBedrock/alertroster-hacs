@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import contextlib
 from collections.abc import Iterator
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING, Any, cast
 
 import voluptuous as vol
 from homeassistant.config_entries import ConfigEntryState
@@ -58,6 +58,24 @@ URGENCIES = ["high", "low"]
 
 _ENTRY_SELECTOR = selector.ConfigEntrySelector({"integration": DOMAIN})
 
+
+def _whole_seconds(value: Any) -> Any:
+    """Refuse a fractional timeout rather than truncating it.
+
+    `cv.positive_int` coerces, and coercion truncates. That was harmless while
+    the bound started at 1: `0.5` became `0`, fell outside the range, and the
+    automation was told its number was wrong. `0` is now the one value that
+    means "never expires", so the same truncation would quietly grant an alert
+    nothing can ever expire to a template that divided its way to half a second.
+
+    Only a real `float` can get here fractional -- `vol.Coerce(int)` already
+    refuses `"0.5"`, because `int()` of that string raises.
+    """
+    if isinstance(value, float) and not value.is_integer():
+        raise vol.Invalid("ack_timeout_seconds must be a whole number of seconds")
+    return value
+
+
 RAISE_SCHEMA = vol.Schema(
     {
         vol.Optional(ATTR_CONFIG_ENTRY): _ENTRY_SELECTOR,
@@ -73,7 +91,9 @@ RAISE_SCHEMA = vol.Schema(
         # somebody far away answer: §7.1 forwards this as `local_grace_seconds`,
         # so the core holds its first escalation for exactly this long and any
         # positive value pages the phone at the moment the panel gives up.
-        vol.Optional(ATTR_ACK_TIMEOUT): vol.All(cv.positive_int, vol.Range(min=0, max=86400)),
+        vol.Optional(ATTR_ACK_TIMEOUT): vol.All(
+            _whole_seconds, cv.positive_int, vol.Range(min=0, max=86400)
+        ),
     }
 )
 
